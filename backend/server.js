@@ -4,6 +4,8 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const http = require("http");
 const socketIO = require("socket.io");
+const { createAdapter } = require("@socket.io/redis-adapter");
+const { createClient } = require("redis");
 const path = require("path");
 const { router: roomsRouter, initializeSocket } = require("./routes/api/rooms");
 const routes = require("./routes");
@@ -14,6 +16,8 @@ const cacheService = require("./services/cacheService");
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5001;
+const io = socketIO(server, { cors: corsOptions });
+app.set('io', io); // Express 앱에서 io 객체를 참조할 수 있도록 설정
 
 // trust proxy 설정 추가
 app.set("trust proxy", 1);
@@ -79,13 +83,6 @@ app.get("/health", (req, res) => {
 // API 라우트 마운트
 app.use("/api", routes);
 
-// Socket.IO 설정
-const io = socketIO(server, { cors: corsOptions });
-require("./sockets/chat")(io);
-
-// Socket.IO 객체 전달
-initializeSocket(io);
-
 // 404 에러 핸들러
 app.use((req, res) => {
   console.log("404 Error:", req.originalUrl);
@@ -106,32 +103,51 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 서버 시작
-mongoose
-  .connect(process.env.MONGO_URI, {
-    readPreference: 'secondaryPreferred',
-  })
-  .then(async () => {
+const startServer = async () => {
+  try {
+    // 1. MongoDB 연결
+    await mongoose.connect(process.env.MONGO_URI, {
+      readPreference: 'secondaryPreferred',
+    });
     console.log("MongoDB Connected");
 
-    // 캐시 정리 실행
+    // 2. Socket.IO 어댑터를 위한 Redis 클라이언트 연결
+    const pubClient = createClient({
+      url: `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`,
+      password: process.env.REDIS_PASSWORD,
+    });
+    const subClient = pubClient.duplicate();
+
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+    console.log("Redis clients for Socket.IO adapter connected");
+
+    // 3. Socket.IO 어댑터 설정
+    io.adapter(createAdapter(pubClient, subClient));
+
+    // 4. Socket.IO 이벤트 핸들러 및 라우터 초기화
+    require("./sockets/chat")(io);
+    initializeSocket(io);
+
+    // 5. 캐시 정리 실행
     try {
       console.log("Starting cache cleanup...");
       await cacheService.clearCorruptedCache();
     } catch (error) {
       console.error("Cache cleanup failed:", error);
-      // 캐시 정리 실패해도 서버는 계속 시작
     }
 
+    // 6. 서버 리스닝 시작
     server.listen(PORT, "0.0.0.0", () => {
       console.log(`✅ Server running on port ${PORT}`);
       console.log(`📦 Environment: ${process.env.NODE_ENV}`);
       console.log(`📡 API Base URL: http://0.0.0.0:${PORT}/api`);
     });
-  })
-  .catch((err) => {
+  } catch (err) {
     console.error("Server startup error:", err);
     process.exit(1);
-  });
+  }
+};
+
+startServer();
 
 module.exports = { app, server };

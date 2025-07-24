@@ -11,9 +11,7 @@ const SessionService = require('../services/sessionService');
 const aiService = require('../services/aiService');
 
 module.exports = function(io) {
-  const connectedUsers = new Map();
-  const streamingSessions = new Map();
-  const userRooms = new Map();
+  // 클러스터 환경을 위해 메모리 기반 상태 관리를 제거합니다.
   const messageQueues = new Map();
   const messageLoadRetries = new Map();
   
@@ -296,37 +294,6 @@ module.exports = function(io) {
     }
   };
 
-  // 중복 로그인 처리 함수 (기존과 동일)
-  const handleDuplicateLogin = async (existingSocket, newSocket) => {
-    try {
-      existingSocket.emit('duplicate_login', {
-        type: 'new_login_attempt',
-        deviceInfo: newSocket.handshake.headers['user-agent'],
-        ipAddress: newSocket.handshake.address,
-        timestamp: Date.now()
-      });
-
-      return new Promise((resolve) => {
-        setTimeout(async () => {
-          try {
-            existingSocket.emit('session_ended', {
-              reason: 'duplicate_login',
-              message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.'
-            });
-            existingSocket.disconnect(true);
-            resolve();
-          } catch (error) {
-            console.error('Error during session termination:', error);
-            resolve();
-          }
-        }, DUPLICATE_LOGIN_TIMEOUT);
-      });
-    } catch (error) {
-      console.error('Duplicate login handling error:', error);
-      throw error;
-    }
-  };
-
   // 미들웨어: 소켓 연결 시 인증 처리 (기존과 동일)
   io.use(async (socket, next) => {
     try {
@@ -342,12 +309,17 @@ module.exports = function(io) {
         return next(new Error('Invalid token'));
       }
 
-      const existingSocketId = connectedUsers.get(decoded.user.id);
-      if (existingSocketId) {
-        const existingSocket = io.sockets.sockets.get(existingSocketId);
-        if (existingSocket) {
-          await handleDuplicateLogin(existingSocket, socket);
-        }
+      // [클러스터 환경 개선] Redis Adapter를 사용하여 클러스터 전체에서 중복 연결 확인
+      const sockets = await io.in(decoded.user.id).fetchSockets();
+      if (sockets.length > 0) {
+        logDebug('duplicate login detected', { userId: decoded.user.id, newSocketId: socket.id });
+        sockets.forEach(oldSocket => {
+          oldSocket.emit('session_ended', {
+            reason: 'duplicate_login',
+            message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.'
+          });
+          oldSocket.disconnect(true);
+        });
       }
 
       const validationResult = await SessionService.validateSession(decoded.user.id, sessionId);
@@ -368,6 +340,9 @@ module.exports = function(io) {
         sessionId: sessionId,
         profileImage: user.profileImage
       };
+
+      // 사용자 ID로 된 방에 입장시켜, io.to(userId)로 개인 메시지 전송 가능하게 함
+      socket.join(socket.user.id);
 
       await SessionService.updateLastActivity(decoded.user.id);
       next();
@@ -394,65 +369,59 @@ module.exports = function(io) {
       userName: socket.user?.name
     });
 
-    if (socket.user) {
-      const previousSocketId = connectedUsers.get(socket.user.id);
-      if (previousSocketId && previousSocketId !== socket.id) {
-        const previousSocket = io.sockets.sockets.get(previousSocketId);
-        if (previousSocket) {
-          previousSocket.emit('duplicate_login', {
-            type: 'new_login_attempt',
-            deviceInfo: socket.handshake.headers['user-agent'],
-            ipAddress: socket.handshake.address,
-            timestamp: Date.now()
-          });
-
-          setTimeout(() => {
-            previousSocket.emit('session_ended', {
-              reason: 'duplicate_login',
-              message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.'
-            });
-            previousSocket.disconnect(true);
-          }, DUPLICATE_LOGIN_TIMEOUT);
-        }
-      }
-      
-      connectedUsers.set(socket.user.id, socket.id);
-    }
-
     // 이전 메시지 로딩 처리 (캐싱 적용)
     socket.on('fetchPreviousMessages', async ({ roomId, before }) => {
-      const queueKey = `${roomId}:${socket.user.id}`;
-
+      const queueKey = `msg_queue:${roomId}:${socket.user.id}`;
+      const retryKey = `msg_retry:${roomId}:${socket.user.id}`;
+    
       try {
-        if (!socket.user) {
-          throw new Error('Unauthorized');
-        }
-
-        // 권한 체크 (캐시 우선 조회)
+        if (!socket.user) throw new Error('Unauthorized');
+    
+        // 권한 체크 (생략)
         await getRoomInfo(roomId, socket.user.id);
-
-        if (messageQueues.get(queueKey)) {
-          logDebug('message load skipped - already loading', {
-            roomId,
-            userId: socket.user.id
-          });
+    
+        // --- 메시지 큐 Redis 사용 ---
+        // NX 옵션: 이미 있으면 false
+        const isAlreadyLoading = !(await redisClient.set(queueKey, "1", { EX: 2, NX: true }));
+        if (isAlreadyLoading) {
+          logDebug('message load skipped - already loading', { roomId, userId: socket.user.id });
           return;
         }
-
-        messageQueues.set(queueKey, true);
-        socket.emit('messageLoadStart');
-
-        const result = await loadMessagesWithRetry(socket, roomId, before);
-        
-        logDebug('previous messages loaded', {
-          roomId,
-          messageCount: result.messages.length,
-          hasMore: result.hasMore,
-          oldestTimestamp: result.oldestTimestamp
-        });
-
-        socket.emit('previousMessagesLoaded', result);
-
+    
+        // --- 로딩 재시도 Redis 사용 ---
+        let currentRetries = Number(await redisClient.get(retryKey) || 0);
+        if (currentRetries >= MAX_RETRIES) {
+          await redisClient.del(retryKey);
+          throw new Error('최대 재시도 횟수를 초과했습니다.');
+        }
+    
+        try {
+          socket.emit('messageLoadStart');
+          const result = await loadMessages(socket, roomId, before);
+    
+          // 성공 시 재시도 횟수 초기화
+          await redisClient.del(retryKey);
+          socket.emit('previousMessagesLoaded', result);
+    
+          logDebug('previous messages loaded', {
+            roomId,
+            messageCount: result.messages.length,
+            hasMore: result.hasMore,
+            oldestTimestamp: result.oldestTimestamp
+          });
+        } catch (error) {
+          // 실패 시 재시도 횟수 증가
+          currentRetries += 1;
+          await redisClient.set(retryKey, currentRetries, { EX: 60 });
+          if (currentRetries < MAX_RETRIES) {
+            const delay = Math.min(RETRY_DELAY * Math.pow(2, currentRetries), 10000);
+            logDebug('retrying message load', { roomId, retryCount: currentRetries, delay });
+            setTimeout(() => socket.emit('fetchPreviousMessages', { roomId, before }), delay);
+          } else {
+            await redisClient.del(retryKey);
+            throw error;
+          }
+        }
       } catch (error) {
         console.error('Fetch previous messages error:', error);
         socket.emit('error', {
@@ -460,8 +429,8 @@ module.exports = function(io) {
           message: error.message || '이전 메시지를 불러오는 중 오류가 발생했습니다.'
         });
       } finally {
-        setTimeout(() => {
-          messageQueues.delete(queueKey);
+        setTimeout(async () => {
+          await redisClient.del(queueKey);
         }, LOAD_DELAY);
       }
     });
@@ -473,7 +442,8 @@ module.exports = function(io) {
               throw new Error('Unauthorized');
           }
 
-          const currentRoom = userRooms.get(socket.user.id);
+          // [Redis] 사용자의 현재 채팅방 정보 조회
+        const currentRoom = await redisClient.get(`user_room:${socket.user.id}`);
           if (currentRoom === roomId) {
               logDebug('already in room', {
                   userId: socket.user.id,
@@ -490,7 +460,8 @@ module.exports = function(io) {
                   roomId: currentRoom
               });
               socket.leave(currentRoom);
-              userRooms.delete(socket.user.id);
+              // [Redis] 이전 채팅방 정보 삭제
+              await redisClient.del(`user_room:${socket.user.id}`);
 
               socket.to(currentRoom).emit('userLeft', {
                   userId: socket.user.id,
@@ -512,11 +483,11 @@ module.exports = function(io) {
               throw new Error('채팅방을 찾을 수 없습니다.');
           }
 
-          // 🌟 이제 cacheService가 정의되어 있으므로 호출할 수 있습니다.
-          await cacheService.cacheRoomInfo(roomId, room); // <--- 여기가 원래 515번째 줄
+          await cacheService.cacheRoomInfo(roomId, room);
 
           socket.join(roomId);
-          userRooms.set(socket.user.id, roomId);
+          // [Redis] 새로운 채팅방 정보 저장 (24시간 TTL)
+          await redisClient.set(`user_room:${socket.user.id}`, roomId, { ttl: 24 * 60 * 60 });
 
           // 입장 메시지 생성
           const joinMessage = new Message({
@@ -728,7 +699,8 @@ module.exports = function(io) {
         const room = await getRoomInfo(roomId, socket.user.id);
 
         socket.leave(roomId);
-        userRooms.delete(socket.user.id);
+        // [Redis] 채팅방 정보 삭제
+        await redisClient.del(`user_room:${socket.user.id}`);
 
         // 퇴장 메시지 생성 및 저장
         const leaveMessage = await Message.create({
