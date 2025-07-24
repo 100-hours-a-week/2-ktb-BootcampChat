@@ -17,7 +17,7 @@ module.exports = function(io) {
   // Redis 헬스체크 함수
   const checkRedisHealth = async () => {
     try {
-      await redisClient.ping();
+      await redisClient.set('health_check', '1', 'EX', 1);
       return true;
     } catch (error) {
       console.error('Redis health check failed:', error);
