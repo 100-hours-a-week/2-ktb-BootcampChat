@@ -138,104 +138,67 @@ const authController = {
         });
       }
 
-      // 기존 세션 확인 시도
-      let existingSession = null;
-      try {
-        existingSession = await SessionService.getActiveSession(user._id);
-      } catch (sessionError) {
-        console.error('Session check error:', sessionError);
+      // Redis Cluster 상태 확인 및 모드 결정
+      const clusterStatus = await SessionService.getClusterStatus();
+      console.log('Redis Cluster status:', clusterStatus);
+
+      if (!clusterStatus.isHealthy) {
+        // 클러스터가 불안정하거나 사용 불가능한 경우
+        console.log('Redis Cluster unhealthy, using in-memory session management for user:', user._id);
+        await this.handleInMemoryLogin(req, res, user, clusterStatus);
+        return;
       }
 
-      if (existingSession) {
-        const io = req.app.get('io');
-        
-        if (io) {
-          try {
-            // 중복 로그인 이벤트 발생 시 더 자세한 정보 제공
-            io.to(existingSession.socketId).emit('duplicate_login', {
-              type: 'new_login_attempt',
-              deviceInfo: req.headers['user-agent'],
-              ipAddress: req.ip,
-              timestamp: Date.now(),
-              location: req.headers['x-forwarded-for'] || req.connection.remoteAddress,
-              browser: req.headers['user-agent']
-            });
+      // Redis Cluster가 정상인 경우 클러스터 기반 로그인 처리
+      await this.handleClusterLogin(req, res, user, clusterStatus);
 
-            // Promise 기반의 응답 대기 로직 개선
-            const response = await new Promise((resolve, reject) => {
-              const timeout = setTimeout(() => {
-                reject(new Error('DUPLICATE_LOGIN_TIMEOUT'));
-              }, 60000); // 60초 타임아웃
+    } catch (error) {
+      console.error('Login error:', error);
+      
+      if (error.message === 'INVALID_TOKEN') {
+        return res.status(401).json({
+          success: false,
+          message: '인증 토큰이 유효하지 않습니다.'
+        });
+      }
 
-              const cleanup = () => {
-                clearTimeout(timeout);
-                io.removeListener('force_login', handleForceLogin);
-                io.removeListener('keep_existing_session', handleKeepSession);
-              };
-
-              const handleForceLogin = async (data) => {
-                try {
-                  if (data.token === existingSession.token) {
-                    // 기존 세션 종료 및 소켓 연결 해제
-                    await SessionService.removeSession(user._id, existingSession.sessionId);
-                    io.to(existingSession.socketId).emit('session_terminated', {
-                      reason: 'new_login',
-                      message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.'
-                    });
-                    resolve('force_login');
-                  } else {
-                    reject(new Error('INVALID_TOKEN'));
-                  }
-                } catch (error) {
-                  reject(error);
-                } finally {
-                  cleanup();
-                }
-              };
-
-              const handleKeepSession = () => {
-                cleanup();
-                resolve('keep_existing');
-              };
-
-              io.once('force_login', handleForceLogin);
-              io.once('keep_existing_session', handleKeepSession);
-            });
-
-            // 응답에 따른 처리
-            if (response === 'keep_existing') {
-              return res.status(409).json({
-                success: false,
-                code: 'DUPLICATE_LOGIN_REJECTED',
-                message: '기존 세션을 유지하도록 선택되었습니다.'
-              });
-            }
-
-          } catch (error) {
-            if (error.message === 'DUPLICATE_LOGIN_TIMEOUT') {
-              return res.status(409).json({
-                success: false,
-                code: 'DUPLICATE_LOGIN_TIMEOUT',
-                message: '중복 로그인 요청이 시간 초과되었습니다.'
-              });
-            }
-            throw error;
+      if (error.code === 'CLUSTERDOWN' || error.code === 'CLUSTERFAIL') {
+        console.error('Redis Cluster error during login:', error);
+        // 클러스터 오류 시 인메모리 모드로 fallback
+        try {
+          const user = await User.findOne({ email: req.body.email });
+          if (user) {
+            await this.handleInMemoryLogin(req, res, user, { isHealthy: false, mode: 'fallback' });
+            return;
           }
-        } else {
-          // Socket.IO 연결이 없는 경우 자동으로 기존 세션 종료
-          await SessionService.removeAllUserSessions(user._id);
+        } catch (fallbackError) {
+          console.error('Fallback login failed:', fallbackError);
         }
       }
+      
+      res.status(500).json({
+        success: false,
+        message: '로그인 처리 중 오류가 발생했습니다.',
+        code: error.code || 'UNKNOWN_ERROR'
+      });
+    }
+  },
 
+  // 인메모리 모드 로그인 처리 (클러스터 상태 정보 포함)
+  async handleInMemoryLogin(req, res, user, clusterStatus = {}) {
+    try {
+      // 기존 세션 모두 제거 (인메모리에서는 단순하게 처리)
+      await SessionService.removeAllUserSessions(user._id);
+      
       // 새 세션 생성
       const sessionInfo = await SessionService.createSession(user._id, {
         userAgent: req.headers['user-agent'],
         ipAddress: req.ip,
         deviceInfo: req.headers['user-agent'],
         loginAt: Date.now(),
-        browser: req.headers['user-agent'],
-        platform: req.headers['sec-ch-ua-platform'],
-        location: req.headers['x-forwarded-for'] || req.connection.remoteAddress
+        mode: 'in-memory',
+        clusterStatus: clusterStatus.mode || 'unavailable',
+        fallbackReason: clusterStatus.error || 'cluster_unavailable'
       });
 
       if (!sessionInfo || !sessionInfo.sessionId) {
@@ -247,7 +210,8 @@ const authController = {
         { 
           user: { id: user._id },
           sessionId: sessionInfo.sessionId,
-          iat: Math.floor(Date.now() / 1000)
+          iat: Math.floor(Date.now() / 1000),
+          mode: 'in-memory'
         },
         jwtSecret,
         { 
@@ -259,23 +223,25 @@ const authController = {
       // 응답 헤더 설정
       res.set({
         'Authorization': `Bearer ${token}`,
-        'x-session-id': sessionInfo.sessionId
+        'x-session-id': sessionInfo.sessionId,
+        'x-session-mode': 'in-memory',
+        'x-cluster-status': clusterStatus.mode || 'unavailable'
       });
 
+      const key = user.profileImage;
+      let profileImage = `${cloudfrontBaseUrl}/${key}`;
 
-    const key = user.profileImage;
-    let profileImage = `${cloudfrontBaseUrl}/${key}`;
-
-    if (key === '') {
+      if (key === '') {
         profileImage = key;
-    }
+      }
 
-
-      // 로그인 캐시
       res.json({
         success: true,
         token,
         sessionId: sessionInfo.sessionId,
+        mode: 'in-memory',
+        clusterStatus: clusterStatus.mode || 'unavailable',
+        warning: '현재 Redis Cluster가 사용 불가능하여 임시 세션으로 동작합니다.',
         user: {
           _id: user._id,
           name: user.name,
@@ -285,20 +251,255 @@ const authController = {
       });
 
     } catch (error) {
-      console.error('Login error:', error);
+      console.error('In-memory login error:', error);
+      throw error;
+    }
+  },
+
+  // Redis Cluster 모드 로그인 처리
+  async handleClusterLogin(req, res, user, clusterStatus) {
+    try {
+      // 클러스터의 모든 노드에서 기존 세션 확인
+      let existingSession = null;
+      const maxRetries = 3;
+      let retryCount = 0;
+
+      while (retryCount < maxRetries && !existingSession) {
+        try {
+          existingSession = await SessionService.getActiveSessionFromCluster(user._id);
+          break;
+        } catch (sessionError) {
+          retryCount++;
+          console.error(`Session check attempt ${retryCount} failed:`, sessionError);
+          
+          if (sessionError.code === 'CLUSTERDOWN' || sessionError.code === 'MOVED' || sessionError.code === 'ASK') {
+            // 클러스터 재구성 중인 경우 잠시 대기
+            await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
+          } else if (retryCount >= maxRetries) {
+            console.error('Max retries reached for session check, removing all sessions');
+            await SessionService.removeAllUserSessionsFromCluster(user._id);
+            break;
+          }
+        }
+      }
+
+      if (existingSession) {
+        const duplicateLoginResult = await this.handleClusterDuplicateLogin(req, user, existingSession, clusterStatus);
+        
+        if (!duplicateLoginResult.shouldProceed) {
+          return res.status(409).json({
+            success: false,
+            code: duplicateLoginResult.code,
+            message: duplicateLoginResult.message
+          });
+        }
+      }
+
+      // 새 세션 생성 (클러스터 환경에서 분산 저장)
+      const sessionInfo = await SessionService.createClusterSession(user._id, {
+        userAgent: req.headers['user-agent'],
+        ipAddress: req.ip,
+        deviceInfo: req.headers['user-agent'],
+        loginAt: Date.now(),
+        browser: req.headers['user-agent'],
+        platform: req.headers['sec-ch-ua-platform'],
+        location: req.headers['x-forwarded-for'] || req.connection.remoteAddress,
+        mode: 'redis-cluster',
+        clusterNodes: clusterStatus.nodes || [],
+        masterNode: clusterStatus.masterNode
+      });
+
+      if (!sessionInfo || !sessionInfo.sessionId) {
+        throw new Error('Cluster session creation failed');
+      }
+
+      // JWT 토큰 생성
+      const token = jwt.sign(
+        { 
+          user: { id: user._id },
+          sessionId: sessionInfo.sessionId,
+          iat: Math.floor(Date.now() / 1000),
+          mode: 'redis-cluster'
+        },
+        jwtSecret,
+        { 
+          expiresIn: '24h',
+          algorithm: 'HS256'
+        }
+      );
+
+      // 응답 헤더 설정
+      res.set({
+        'Authorization': `Bearer ${token}`,
+        'x-session-id': sessionInfo.sessionId,
+        'x-session-mode': 'redis-cluster',
+        'x-cluster-status': 'healthy',
+        'x-cluster-nodes': clusterStatus.nodes?.length || 0
+      });
+
+      const key = user.profileImage;
+      let profileImage = `${cloudfrontBaseUrl}/${key}`;
+
+      if (key === '') {
+        profileImage = key;
+      }
+
+      res.json({
+        success: true,
+        token,
+        sessionId: sessionInfo.sessionId,
+        mode: 'redis-cluster',
+        clusterStatus: 'healthy',
+        clusterInfo: {
+          nodes: clusterStatus.nodes?.length || 0,
+          masterNode: clusterStatus.masterNode
+        },
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          profileImage
+        }
+      });
+
+    } catch (error) {
+      console.error('Redis Cluster login error:', error);
       
-      if (error.message === 'INVALID_TOKEN') {
-        return res.status(401).json({
-          success: false,
-          message: '인증 토큰이 유효하지 않습니다.'
+      // 클러스터 오류 시 인메모리 모드로 fallback
+      if (error.code === 'CLUSTERDOWN' || error.code === 'CLUSTERFAIL' || error.code === 'MOVED') {
+        console.log('Cluster error detected, falling back to in-memory mode');
+        await this.handleInMemoryLogin(req, res, user, { 
+          isHealthy: false, 
+          mode: 'fallback', 
+          error: error.code 
         });
+        return;
       }
       
-      res.status(500).json({
-        success: false,
-        message: '로그인 처리 중 오류가 발생했습니다.',
-        code: error.code || 'UNKNOWN_ERROR'
+      throw error;
+    }
+  },
+
+  // 클러스터 환경에서의 중복 로그인 처리
+  async handleClusterDuplicateLogin(req, user, existingSession, clusterStatus) {
+    try {
+      const io = req.app.get('io');
+      
+      if (!io) {
+        // Socket.IO가 없으면 클러스터의 모든 노드에서 기존 세션 제거
+        await SessionService.removeAllUserSessionsFromCluster(user._id);
+        return { shouldProceed: true };
+      }
+
+      // 중복 로그인 알림 (클러스터 정보 포함)
+      io.to(existingSession.socketId).emit('duplicate_login', {
+        type: 'new_login_attempt',
+        deviceInfo: req.headers['user-agent'],
+        ipAddress: req.ip,
+        timestamp: Date.now(),
+        location: req.headers['x-forwarded-for'] || req.connection.remoteAddress,
+        browser: req.headers['user-agent'],
+        clusterInfo: {
+          currentNode: clusterStatus.masterNode,
+          totalNodes: clusterStatus.nodes?.length || 0
+        }
       });
+
+      // 클러스터 환경에서는 더 짧은 타임아웃 사용 (네트워크 지연 고려)
+      const response = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          cleanup();
+          resolve('force_login_timeout');
+        }, 10000); // 10초 타임아웃 (클러스터 환경에서 더 짧게)
+
+        const eventListeners = new Map();
+
+        const cleanup = () => {
+          clearTimeout(timeout);
+          eventListeners.forEach((listener, event) => {
+            io.removeListener(event, listener);
+          });
+          eventListeners.clear();
+        };
+
+        const handleForceLogin = async (data) => {
+          try {
+            if (data.token === existingSession.token) {
+              // 클러스터의 모든 노드에서 세션 제거
+              await SessionService.removeSessionFromCluster(user._id, existingSession.sessionId);
+              io.to(existingSession.socketId).emit('session_terminated', {
+                reason: 'new_login',
+                message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.',
+                clusterSync: true
+              });
+              cleanup();
+              resolve('force_login');
+            } else {
+              cleanup();
+              reject(new Error('INVALID_TOKEN'));
+            }
+          } catch (error) {
+            cleanup();
+            // 클러스터 오류 시에도 세션 제거 시도
+            if (error.code === 'CLUSTERDOWN' || error.code === 'MOVED') {
+              try {
+                await SessionService.removeAllUserSessionsFromCluster(user._id);
+                resolve('force_login_cluster_error');
+              } catch (fallbackError) {
+                reject(fallbackError);
+              }
+            } else {
+              reject(error);
+            }
+          }
+        };
+
+        const handleKeepSession = () => {
+          cleanup();
+          resolve('keep_existing');
+        };
+
+        eventListeners.set('force_login', handleForceLogin);
+        eventListeners.set('keep_existing_session', handleKeepSession);
+        
+        io.once('force_login', handleForceLogin);
+        io.once('keep_existing_session', handleKeepSession);
+      });
+
+      if (response === 'keep_existing') {
+        return {
+          shouldProceed: false,
+          code: 'DUPLICATE_LOGIN_REJECTED',
+          message: '기존 세션을 유지하도록 선택되었습니다.'
+        };
+      }
+
+      if (response === 'force_login_timeout' || response === 'force_login_cluster_error') {
+        console.log('Duplicate login timeout or cluster error, proceeding with automatic session termination');
+        await SessionService.removeAllUserSessionsFromCluster(user._id);
+      }
+
+      return { shouldProceed: true };
+
+    } catch (error) {
+      console.error('Cluster duplicate login handling error:', error);
+      
+      if (error.message === 'INVALID_TOKEN') {
+        return {
+          shouldProceed: false,
+          code: 'INVALID_TOKEN',
+          message: '인증 토큰이 유효하지 않습니다.'
+        };
+      }
+
+      // 클러스터 오류 시 안전하게 모든 세션 종료
+      try {
+        await SessionService.removeAllUserSessionsFromCluster(user._id);
+      } catch (cleanupError) {
+        console.error('Cleanup error after duplicate login failure:', cleanupError);
+      }
+      
+      return { shouldProceed: true };
     }
   },
 
@@ -312,27 +513,40 @@ const authController = {
         });
       }
 
-      await SessionService.removeSession(req.user.id, sessionId);
+      // 클러스터 상태 확인
+      const clusterStatus = await SessionService.getClusterStatus();
+      
+      // 세션 제거 (클러스터/인메모리 모드 자동 처리)
+      if (clusterStatus.isHealthy) {
+        await SessionService.removeSessionFromCluster(req.user.id, sessionId);
+      } else {
+        await SessionService.removeSession(req.user.id, sessionId);
+      }
 
       // Socket.IO 클라이언트에 로그아웃 알림
       const io = req.app.get('io');
       if (io) {
-        const socketId = await SessionService.getSocketId(req.user.id, sessionId);
-        if (socketId) {
-          io.to(socketId).emit('session_ended', {
-            reason: 'logout',
-            message: '로그아웃되었습니다.'
-          });
+        try {
+          const socketId = await SessionService.getSocketId(req.user.id, sessionId);
+          if (socketId) {
+            io.to(socketId).emit('session_ended', {
+              reason: 'logout',
+              message: '로그아웃되었습니다.',
+              clusterMode: clusterStatus.isHealthy
+            });
+          }
+        } catch (socketError) {
+          console.error('Socket notification error during logout:', socketError);
         }
       }
       
-      // 쿠키 및 헤더 정리
       res.clearCookie('token');
       res.clearCookie('sessionId');
       
       res.json({
         success: true,
-        message: '로그아웃되었습니다.'
+        message: '로그아웃되었습니다.',
+        clusterStatus: clusterStatus.isHealthy ? 'healthy' : 'degraded'
       });
     } catch (error) {
       console.error('Logout error:', error);
@@ -366,7 +580,6 @@ const authController = {
         });
       }
 
-      // 토큰의 sessionId와 헤더의 sessionId 일치 여부 확인
       if (decoded.sessionId !== sessionId) {
         return res.status(401).json({
           success: false,
@@ -374,7 +587,6 @@ const authController = {
         });
       }
 
-      // 사용자 정보 조회
       const user = await User.findById(decoded.user.id);
       if (!user) {
         return res.status(404).json({
@@ -383,37 +595,61 @@ const authController = {
         });
       }
 
-      // 세션 검증
-      const validationResult = await SessionService.validateSession(user._id, sessionId);
-      if (!validationResult.isValid) {
-        console.log('Invalid session:', validationResult);
-        return res.status(401).json({
-          success: false,
-          code: validationResult.error,
-          message: validationResult.message
-        });
-      }
+      // 클러스터 상태 확인 및 세션 검증
+      const clusterStatus = await SessionService.getClusterStatus();
+      
+      if (clusterStatus.isHealthy) {
+        // 클러스터가 정상인 경우 클러스터 기반 세션 검증
+        const validationResult = await SessionService.validateClusterSession(user._id, sessionId);
+        if (!validationResult.isValid) {
+          console.log('Invalid cluster session:', validationResult);
+          return res.status(401).json({
+            success: false,
+            code: validationResult.error,
+            message: validationResult.message
+          });
+        }
 
-      // 세션 갱신
-      await SessionService.refreshSession(user._id, sessionId);
+        // 클러스터에서 세션 갱신
+        await SessionService.refreshClusterSession(user._id, sessionId);
+
+        if (validationResult.needsProfileRefresh) {
+          res.set('X-Profile-Update-Required', 'true');
+        }
+      } else {
+        // 클러스터가 불안정한 경우 기본적인 세션 검증만 수행
+        console.log('Cluster degraded, using basic session validation for user:', user._id);
+        try {
+          const sessionExists = await SessionService.sessionExists(user._id, sessionId);
+          if (!sessionExists) {
+            return res.status(401).json({
+              success: false,
+              code: 'SESSION_NOT_FOUND',
+              message: '세션을 찾을 수 없습니다.'
+            });
+          }
+        } catch (sessionError) {
+          console.error('Session validation error in degraded cluster mode:', sessionError);
+        }
+      }
 
       console.log('Token verification successful for user:', user._id);
 
-      // 프로필 업데이트 필요 여부 확인
-      if (validationResult.needsProfileRefresh) {
-        res.set('X-Profile-Update-Required', 'true');
+      const key = user.profileImage;
+      let profileImage = `${cloudfrontBaseUrl}/${key}`;
+
+      if (key === '') {
+        profileImage = key;
       }
 
-    const key = user.profileImage;
-    let profileImage = `${cloudfrontBaseUrl}/${key}`;
-
-    if (key === '') {
-        profileImage = key;
-    }
-
-    // 토큰 조회 캐시
       res.json({
         success: true,
+        mode: clusterStatus.isHealthy ? 'redis-cluster' : 'degraded',
+        clusterStatus: clusterStatus.isHealthy ? 'healthy' : 'degraded',
+        clusterInfo: clusterStatus.isHealthy ? {
+          nodes: clusterStatus.nodes?.length || 0,
+          masterNode: clusterStatus.masterNode
+        } : null,
         user: {
           _id: user._id,
           name: user.name,
@@ -465,16 +701,37 @@ const authController = {
         });
       }
 
+      // 클러스터 상태 확인
+      const clusterStatus = await SessionService.getClusterStatus();
+
       // 이전 세션 제거
-      await SessionService.removeSession(user._id, oldSessionId);
+      try {
+        if (clusterStatus.isHealthy) {
+          await SessionService.removeSessionFromCluster(user._id, oldSessionId);
+        } else {
+          await SessionService.removeSession(user._id, oldSessionId);
+        }
+      } catch (removeError) {
+        console.error('Error removing old session:', removeError);
+      }
 
       // 새 세션 생성
-      const sessionInfo = await SessionService.createSession(user._id, {
-        userAgent: req.headers['user-agent'],
-        ipAddress: req.ip,
-        deviceInfo: req.headers['user-agent'],
-        refreshedAt: Date.now()
-      });
+      const sessionInfo = clusterStatus.isHealthy 
+        ? await SessionService.createClusterSession(user._id, {
+            userAgent: req.headers['user-agent'],
+            ipAddress: req.ip,
+            deviceInfo: req.headers['user-agent'],
+            refreshedAt: Date.now(),
+            mode: 'redis-cluster',
+            clusterNodes: clusterStatus.nodes || []
+          })
+        : await SessionService.createSession(user._id, {
+            userAgent: req.headers['user-agent'],
+            ipAddress: req.ip,
+            deviceInfo: req.headers['user-agent'],
+            refreshedAt: Date.now(),
+            mode: 'in-memory'
+          });
 
       if (!sessionInfo || !sessionInfo.sessionId) {
         throw new Error('Failed to create new session');
@@ -485,7 +742,8 @@ const authController = {
         { 
           user: { id: user._id },
           sessionId: sessionInfo.sessionId,
-          iat: Math.floor(Date.now() / 1000)
+          iat: Math.floor(Date.now() / 1000),
+          mode: clusterStatus.isHealthy ? 'redis-cluster' : 'in-memory'
         },
         jwtSecret,
         { 
@@ -494,20 +752,20 @@ const authController = {
         }
       );
 
-
       const key = user.profileImage;
       let profileImage = `${cloudfrontBaseUrl}/${key}`;
 
       if (key === '') {
-          profileImage = key;
+        profileImage = key;
       }
 
-      // 토큰 재발급 캐시
       res.json({
         success: true,
         message: '토큰이 갱신되었습니다.',
         token,
         sessionId: sessionInfo.sessionId,
+        mode: clusterStatus.isHealthy ? 'redis-cluster' : 'in-memory',
+        clusterStatus: clusterStatus.isHealthy ? 'healthy' : 'degraded',
         user: {
           _id: user._id,
           name: user.name,
