@@ -8,6 +8,9 @@ const path = require("path");
 const { router: roomsRouter, initializeSocket } = require("./routes/api/rooms");
 const routes = require("./routes");
 
+// 캐시 서비스 import 추가
+const cacheService = require("./services/cacheService");
+
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5001;
@@ -106,8 +109,18 @@ app.use((err, req, res, next) => {
 // 서버 시작
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => {
+  .then(async () => {
     console.log("MongoDB Connected");
+
+    // 캐시 정리 실행
+    try {
+      console.log("Starting cache cleanup...");
+      await cacheService.clearCorruptedCache();
+    } catch (error) {
+      console.error("Cache cleanup failed:", error);
+      // 캐시 정리 실패해도 서버는 계속 시작
+    }
+
     server.listen(PORT, "0.0.0.0", () => {
       console.log(`Server running on port ${PORT}`);
       console.log("Environment:", process.env.NODE_ENV);

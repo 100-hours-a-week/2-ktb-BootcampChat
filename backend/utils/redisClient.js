@@ -139,18 +139,23 @@ class RedisClient {
       if (!this.isConnected) {
         await this.connect();
       }
-
+  
       if (this.useMock) {
         return await this.client.set(key, value, options);
       }
-
+  
       let stringValue;
-      if (typeof value === 'object') {
-        stringValue = JSON.stringify(value);
+      if (typeof value === 'object' && value !== null) {
+        try {
+          stringValue = JSON.stringify(value);
+        } catch (jsonError) {
+          console.error('JSON stringify error:', jsonError);
+          stringValue = String(value); // fallback
+        }
       } else {
         stringValue = String(value);
       }
-
+  
       if (options.ttl) {
         return await this.client.setEx(key, options.ttl, stringValue);
       }
@@ -166,17 +171,26 @@ class RedisClient {
       if (!this.isConnected) {
         await this.connect();
       }
-
+  
       if (this.useMock) {
         return await this.client.get(key);
       }
-
+  
       const value = await this.client.get(key);
       if (!value) return null;
-
+  
+      // "[object Object]" 같은 잘못된 데이터 체크
+      if (value === '[object Object]' || (typeof value === 'string' && value.startsWith('[object '))) {
+        console.warn(`[Redis] Corrupted data detected for key ${key}, removing`);
+        await this.client.del(key);
+        return null;
+      }
+  
       try {
         return JSON.parse(value);
       } catch (parseError) {
+        console.warn(`[Redis] Failed to parse value for key ${key}:`, value);
+        // 파싱 실패시 원본 문자열 반환
         return value;
       }
     } catch (error) {
@@ -190,18 +204,23 @@ class RedisClient {
       if (!this.isConnected) {
         await this.connect();
       }
-
+  
       if (this.useMock) {
         return await this.client.setEx(key, seconds, value);
       }
-
+  
       let stringValue;
-      if (typeof value === 'object') {
-        stringValue = JSON.stringify(value);
+      if (typeof value === 'object' && value !== null) {
+        try {
+          stringValue = JSON.stringify(value);
+        } catch (jsonError) {
+          console.error('JSON stringify error:', jsonError);
+          stringValue = String(value); // fallback
+        }
       } else {
         stringValue = String(value);
       }
-
+  
       return await this.client.setEx(key, seconds, stringValue);
     } catch (error) {
       console.error('Redis setEx error:', error);
@@ -243,6 +262,28 @@ class RedisClient {
       } catch (error) {
         console.error('Redis quit error:', error);
       }
+    }
+  }
+
+  // redisClient.js 내부에 아래 메서드 추가
+  async keys(pattern) {
+    try {
+      if (!this.isConnected) {
+        await this.connect();
+      }
+
+      if (this.useMock) {
+        // MockRedis 처리
+        const store = this.client.store;
+        return Array.from(store.keys()).filter(key =>
+          new RegExp('^' + pattern.replace(/\*/g, '.*') + '$').test(key)
+        );
+      }
+
+      return await this.client.keys(pattern);
+    } catch (error) {
+      console.error('Redis keys error:', error);
+      throw error;
     }
   }
 }
