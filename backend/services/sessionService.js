@@ -88,7 +88,7 @@ class SessionService {
       };
 
       const sessionKey = this.getSessionKey(userId);
-      const sessionIdKey = this.getSessionIdKey(sessionId);
+      const sessionIdKey = this.getSessionIdKey(userId, sessionId);
       const userSessionsKey = this.getUserSessionsKey(userId);
       const activeSessionKey = this.getActiveSessionKey(userId);
 
@@ -182,7 +182,7 @@ class SessionService {
       await Promise.all([
         redisClient.expire(activeSessionKey, this.SESSION_TTL),
         redisClient.expire(this.getUserSessionsKey(userId), this.SESSION_TTL),
-        redisClient.expire(this.getSessionIdKey(sessionId), this.SESSION_TTL)
+        redisClient.expire(this.getSessionIdKey(userId, sessionId), this.SESSION_TTL)
       ]);
 
       return {
@@ -210,7 +210,7 @@ class SessionService {
         if (currentSessionId === sessionId) {
           await Promise.all([
             redisClient.del(this.getSessionKey(userId)),
-            redisClient.del(this.getSessionIdKey(sessionId)),
+            redisClient.del(this.getSessionIdKey(userId, sessionId)),
             redisClient.del(userSessionsKey),
             redisClient.del(activeSessionKey)
           ]);
@@ -220,7 +220,7 @@ class SessionService {
         if (storedSessionId) {
           await Promise.all([
             redisClient.del(this.getSessionKey(userId)),
-            redisClient.del(this.getSessionIdKey(storedSessionId)),
+            redisClient.del(this.getSessionIdKey(userId, storedSessionId)),
             redisClient.del(userSessionsKey),
             redisClient.del(activeSessionKey)
           ]);
@@ -246,7 +246,7 @@ class SessionService {
       if (sessionId) {
         deletePromises.push(
           redisClient.del(this.getSessionKey(userId)),
-          redisClient.del(this.getSessionIdKey(sessionId))
+          redisClient.del(this.getSessionIdKey(userId, sessionId))
         );
       }
 
@@ -287,7 +287,7 @@ class SessionService {
       const activeSessionKey = this.getActiveSessionKey(userId);
       const userSessionsKey = this.getUserSessionsKey(userId);
       if (sessionData.sessionId) {
-        const sessionIdKey = this.getSessionIdKey(sessionData.sessionId);
+        const sessionIdKey = this.getSessionIdKey(userId, sessionData.sessionId);
         await Promise.all([
           redisClient.expire(activeSessionKey, this.SESSION_TTL),
           redisClient.expire(userSessionsKey, this.SESSION_TTL),
@@ -337,19 +337,19 @@ class SessionService {
   }
 
   static getSessionKey(userId) {
-    return `${this.SESSION_PREFIX}${userId}`;
+    return `${this.SESSION_PREFIX}{${userId}}`;
   }
 
-  static getSessionIdKey(sessionId) {
-    return `${this.SESSION_ID_PREFIX}${sessionId}`;
+  static getSessionIdKey(userId, sessionId) {
+    return `${this.SESSION_ID_PREFIX}{${userId}}:${sessionId}`;
   }
 
   static getUserSessionsKey(userId) {
-    return `${this.USER_SESSIONS_PREFIX}${userId}`;
+    return `${this.USER_SESSIONS_PREFIX}{${userId}}`;
   }
 
   static getActiveSessionKey(userId) {
-    return `${this.ACTIVE_SESSION_PREFIX}${userId}`;
+    return `${this.ACTIVE_SESSION_PREFIX}{${userId}}`;
   }
 
   static generateSessionId() {
