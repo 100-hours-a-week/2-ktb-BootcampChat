@@ -13,6 +13,7 @@ module.exports = {
   redisHost: process.env.REDIS_HOST,
   redisPassword: process.env.REDIS_PASSWORD,
   redisPort: process.env.REDIS_PORT,
+  redisClusterNodes: process.env.REDIS_CLUSTER_NODES, // 추가
   openaiApiKey: process.env.OPENAI_API_KEY,
   vectorDbEndpoint: process.env.VECTOR_DB_ENDPOINT,
   s3Region: process.env.S3_REGION,

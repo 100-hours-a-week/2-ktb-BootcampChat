@@ -1,5 +1,7 @@
+// backend/services/sessionService.js
 const redisClient = require('../utils/redisClient');
 const crypto = require('crypto');
+const connectedUsersService = require('./connectedUsersService');
 
 class SessionService {
   static SESSION_TTL = 24 * 60 * 60; // 24 hours
@@ -7,6 +9,7 @@ class SessionService {
   static SESSION_ID_PREFIX = 'sessionId:';
   static USER_SESSIONS_PREFIX = 'user_sessions:';
   static ACTIVE_SESSION_PREFIX = 'active_session:';
+  static GLOBAL_SESSIONS_PREFIX = 'global_sessions:'; // 글로벌 세션 추적용
 
   // 안전한 JSON 직렬화
   static safeStringify(data) {
@@ -26,7 +29,6 @@ class SessionService {
       if (typeof data === 'object') return data;
       if (typeof data !== 'string') return null;
       
-      // 이미 객체인 경우 즉시 반환
       if (data === '[object Object]') return null;
       
       return JSON.parse(data);
@@ -70,13 +72,39 @@ class SessionService {
 
   static async createSession(userId, metadata = {}) {
     try {
-      // 기존 세션들 모두 제거
-      await this.removeAllUserSessions(userId);
+      const instanceId = process.env.INSTANCE_ID || `instance_${Date.now()}`;
+      
+      // 글로벌 세션 충돌 확인
+      const existingGlobalSession = await this.getGlobalSession(userId);
+      
+      if (existingGlobalSession) {
+        console.log(`🔍 Existing global session found for user ${userId}:`, {
+          existingInstanceId: existingGlobalSession.instanceId,
+          currentInstanceId: instanceId,
+          existingSessionId: existingGlobalSession.sessionId
+        });
+
+        // 다른 인스턴스에서 활성 세션이 있는 경우
+        if (existingGlobalSession.instanceId !== instanceId) {
+          console.log(`⚠️ Cross-instance session conflict detected for user ${userId}`);
+          
+          // 기존 세션 무효화 알림
+          await this.notifySessionConflict(userId, existingGlobalSession, {
+            instanceId,
+            userAgent: metadata.userAgent,
+            ipAddress: metadata.ipAddress
+          });
+        }
+        
+        // 기존 세션들 모두 제거
+        await this.removeAllUserSessions(userId);
+      }
 
       const sessionId = this.generateSessionId();
       const sessionData = {
         userId,
         sessionId,
+        instanceId,
         createdAt: Date.now(),
         lastActivity: Date.now(),
         metadata: {
@@ -91,6 +119,7 @@ class SessionService {
       const sessionIdKey = this.getSessionIdKey(sessionId);
       const userSessionsKey = this.getUserSessionsKey(userId);
       const activeSessionKey = this.getActiveSessionKey(userId);
+      const globalSessionKey = this.getGlobalSessionKey(userId);
 
       // 세션 데이터 저장
       const saved = await this.setJson(sessionKey, sessionData, this.SESSION_TTL);
@@ -98,10 +127,15 @@ class SessionService {
         throw new Error('세션 데이터 저장에 실패했습니다.');
       }
 
-      // 세션 ID 매핑 저장 - 문자열 값은 직접 저장
+      // 다양한 키 매핑 저장
       await redisClient.setEx(sessionIdKey, this.SESSION_TTL, userId.toString());
       await redisClient.setEx(userSessionsKey, this.SESSION_TTL, sessionId);
       await redisClient.setEx(activeSessionKey, this.SESSION_TTL, sessionId);
+
+      // 글로벌 세션 정보 저장
+      await this.setJson(globalSessionKey, sessionData, this.SESSION_TTL);
+
+      console.log(`✅ Session created for user ${userId} on instance ${instanceId}`);
 
       return {
         sessionId,
@@ -110,7 +144,7 @@ class SessionService {
       };
 
     } catch (error) {
-      console.error('Session creation error:', error);
+      console.error('❌ Session creation error:', error);
       throw new Error('세션 생성 중 오류가 발생했습니다.');
     }
   }
@@ -125,20 +159,53 @@ class SessionService {
         };
       }
 
-      // 활성 세션 확인
-      const activeSessionKey = this.getActiveSessionKey(userId);
-      const activeSessionId = await redisClient.get(activeSessionKey);
+      // 글로벌 세션 확인
+      const globalSession = await this.getGlobalSession(userId);
+      if (!globalSession) {
+        return {
+          isValid: false,
+          error: 'SESSION_NOT_FOUND',
+          message: '세션을 찾을 수 없습니다.'
+        };
+      }
 
-      if (!activeSessionId || activeSessionId !== sessionId) {
-        console.log('Session validation failed:', {
-          userId,
-          sessionId,
-          activeSessionId
+      // 세션 ID 일치 확인
+      if (globalSession.sessionId !== sessionId) {
+        console.log(`❌ Session ID mismatch for user ${userId}:`, {
+          provided: sessionId,
+          expected: globalSession.sessionId
         });
         return {
           isValid: false,
           error: 'INVALID_SESSION',
           message: '다른 기기에서 로그인되어 현재 세션이 만료되었습니다.'
+        };
+      }
+
+      // 인스턴스 확인
+      const currentInstanceId = process.env.INSTANCE_ID || `instance_${Date.now()}`;
+      if (globalSession.instanceId !== currentInstanceId) {
+        console.log(`⚠️ Session belongs to different instance for user ${userId}:`, {
+          sessionInstance: globalSession.instanceId,
+          currentInstance: currentInstanceId
+        });
+        
+        return {
+          isValid: false,
+          error: 'SESSION_INSTANCE_MISMATCH',
+          message: '다른 인스턴스에서 활성화된 세션입니다.'
+        };
+      }
+
+      // 활성 세션 확인
+      const activeSessionKey = this.getActiveSessionKey(userId);
+      const activeSessionId = await redisClient.get(activeSessionKey);
+
+      if (!activeSessionId || activeSessionId !== sessionId) {
+        return {
+          isValid: false,
+          error: 'INVALID_SESSION',
+          message: '활성 세션이 아닙니다.'
         };
       }
 
@@ -149,8 +216,8 @@ class SessionService {
       if (!sessionData) {
         return {
           isValid: false,
-          error: 'SESSION_NOT_FOUND',
-          message: '세션을 찾을 수 없습니다.'
+          error: 'SESSION_DATA_NOT_FOUND',
+          message: '세션 데이터를 찾을 수 없습니다.'
         };
       }
 
@@ -178,6 +245,10 @@ class SessionService {
         };
       }
 
+      // 글로벌 세션도 갱신
+      const globalSessionKey = this.getGlobalSessionKey(userId);
+      await this.setJson(globalSessionKey, sessionData, this.SESSION_TTL);
+
       // 관련 키들의 만료 시간 갱신
       await Promise.all([
         redisClient.expire(activeSessionKey, this.SESSION_TTL),
@@ -191,7 +262,7 @@ class SessionService {
       };
 
     } catch (error) {
-      console.error('Session validation error:', error);
+      console.error('❌ Session validation error:', error);
       return {
         isValid: false,
         error: 'VALIDATION_ERROR',
@@ -200,10 +271,35 @@ class SessionService {
     }
   }
 
+  // 글로벌 세션 조회
+  static async getGlobalSession(userId) {
+    try {
+      const globalSessionKey = this.getGlobalSessionKey(userId);
+      return await this.getJson(globalSessionKey);
+    } catch (error) {
+      console.error('❌ Get global session error:', error);
+      return null;
+    }
+  }
+
+  // 세션 충돌 알림
+  static async notifySessionConflict(userId, existingSession, newSessionInfo) {
+    try {
+      await connectedUsersService.notifyDuplicateLogin(
+        userId,
+        existingSession,
+        newSessionInfo
+      );
+    } catch (error) {
+      console.error('❌ Notify session conflict error:', error);
+    }
+  }
+
   static async removeSession(userId, sessionId = null) {
     try {
       const userSessionsKey = this.getUserSessionsKey(userId);
       const activeSessionKey = this.getActiveSessionKey(userId);
+      const globalSessionKey = this.getGlobalSessionKey(userId);
 
       if (sessionId) {
         const currentSessionId = await redisClient.get(userSessionsKey);
@@ -212,7 +308,8 @@ class SessionService {
             redisClient.del(this.getSessionKey(userId)),
             redisClient.del(this.getSessionIdKey(sessionId)),
             redisClient.del(userSessionsKey),
-            redisClient.del(activeSessionKey)
+            redisClient.del(activeSessionKey),
+            redisClient.del(globalSessionKey)
           ]);
         }
       } else {
@@ -222,12 +319,15 @@ class SessionService {
             redisClient.del(this.getSessionKey(userId)),
             redisClient.del(this.getSessionIdKey(storedSessionId)),
             redisClient.del(userSessionsKey),
-            redisClient.del(activeSessionKey)
+            redisClient.del(activeSessionKey),
+            redisClient.del(globalSessionKey)
           ]);
         }
       }
+
+      console.log(`🗑️ Session removed for user ${userId}`);
     } catch (error) {
-      console.error('Session removal error:', error);
+      console.error('❌ Session removal error:', error);
       throw error;
     }
   }
@@ -236,11 +336,13 @@ class SessionService {
     try {
       const activeSessionKey = this.getActiveSessionKey(userId);
       const userSessionsKey = this.getUserSessionsKey(userId);
+      const globalSessionKey = this.getGlobalSessionKey(userId);
       const sessionId = await redisClient.get(userSessionsKey);
 
       const deletePromises = [
         redisClient.del(activeSessionKey),
-        redisClient.del(userSessionsKey)
+        redisClient.del(userSessionsKey),
+        redisClient.del(globalSessionKey)
       ];
 
       if (sessionId) {
@@ -251,9 +353,11 @@ class SessionService {
       }
 
       await Promise.all(deletePromises);
+      
+      console.log(`🧹 All sessions removed for user ${userId}`);
       return true;
     } catch (error) {
-      console.error('Remove all user sessions error:', error);
+      console.error('❌ Remove all user sessions error:', error);
       return false;
     }
   }
@@ -283,6 +387,10 @@ class SessionService {
         return false;
       }
 
+      // 글로벌 세션도 갱신
+      const globalSessionKey = this.getGlobalSessionKey(userId);
+      await this.setJson(globalSessionKey, sessionData, this.SESSION_TTL);
+
       // 관련 키들의 만료 시간도 함께 갱신
       const activeSessionKey = this.getActiveSessionKey(userId);
       const userSessionsKey = this.getUserSessionsKey(userId);
@@ -298,7 +406,7 @@ class SessionService {
       return true;
 
     } catch (error) {
-      console.error('Update last activity error:', error);
+      console.error('❌ Update last activity error:', error);
       return false;
     }
   }  
@@ -307,6 +415,19 @@ class SessionService {
     try {
       if (!userId) {
         console.error('getActiveSession: userId is required');
+        return null;
+      }
+
+      // 글로벌 세션부터 확인
+      const globalSession = await this.getGlobalSession(userId);
+      if (!globalSession) {
+        return null;
+      }
+
+      // 현재 인스턴스의 세션인지 확인
+      const currentInstanceId = process.env.INSTANCE_ID || `instance_${Date.now()}`;
+      if (globalSession.instanceId !== currentInstanceId) {
+        console.log(`ℹ️ Active session for user ${userId} is on different instance: ${globalSession.instanceId}`);
         return null;
       }
 
@@ -331,11 +452,12 @@ class SessionService {
         sessionId
       };
     } catch (error) {
-      console.error('Get active session error:', error);
+      console.error('❌ Get active session error:', error);
       return null;
     }
   }
 
+  // 키 생성 메서드들
   static getSessionKey(userId) {
     return `${this.SESSION_PREFIX}${userId}`;
   }
@@ -352,8 +474,70 @@ class SessionService {
     return `${this.ACTIVE_SESSION_PREFIX}${userId}`;
   }
 
+  static getGlobalSessionKey(userId) {
+    return `${this.GLOBAL_SESSIONS_PREFIX}${userId}`;
+  }
+
   static generateSessionId() {
     return crypto.randomBytes(32).toString('hex');
+  }
+
+  // 세션 통계 조회
+  static async getSessionStats() {
+    try {
+      const allGlobalSessions = await this.getAllGlobalSessions();
+      const currentInstanceId = process.env.INSTANCE_ID || `instance_${Date.now()}`;
+
+      // 인스턴스별 세션 분포
+      const instanceStats = {};
+      let currentInstanceSessions = 0;
+
+      Object.values(allGlobalSessions).forEach(session => {
+        const instance = session.instanceId || 'unknown';
+        instanceStats[instance] = (instanceStats[instance] || 0) + 1;
+        
+        if (instance === currentInstanceId) {
+          currentInstanceSessions++;
+        }
+      });
+
+      return {
+        totalGlobalSessions: Object.keys(allGlobalSessions).length,
+        currentInstanceSessions,
+        instanceStats,
+        redisConnected: redisClient.getStatus().connected
+      };
+    } catch (error) {
+      console.error('❌ Get session stats error:', error);
+      return {
+        totalGlobalSessions: 0,
+        currentInstanceSessions: 0,
+        instanceStats: {},
+        redisConnected: false,
+        error: error.message
+      };
+    }
+  }
+
+  // 모든 글로벌 세션 조회
+  static async getAllGlobalSessions() {
+    try {
+      const keys = await redisClient.keys(`${this.GLOBAL_SESSIONS_PREFIX}*`);
+      const sessions = {};
+
+      for (const key of keys) {
+        const userId = key.replace(this.GLOBAL_SESSIONS_PREFIX, '');
+        const sessionData = await this.getJson(key);
+        if (sessionData) {
+          sessions[userId] = sessionData;
+        }
+      }
+
+      return sessions;
+    } catch (error) {
+      console.error('❌ Get all global sessions error:', error);
+      return {};
+    }
   }
 }
 
