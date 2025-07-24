@@ -10,21 +10,26 @@ const redisNodes = (() => {
   const raw = process.env.REDIS_CLUSTER_NODES;
   if (!raw) return [];
   try {
-    // JSON 배열 형태
     const arr = JSON.parse(raw);
     if (Array.isArray(arr)) {
       return arr.map(item => {
-        const [host, port] = item.split(':');
-        return { host, port: Number(port) };
+        try {
+          const url = new URL(item);
+          return { host: url.hostname, port: Number(url.port) };
+        } catch {
+          const [host, port] = item.replace('redis://', '').split(':');
+          return { host, port: Number(port) };
+        }
       });
     }
   } catch {}
-  // 콤마 구분 문자열 형태
+  // 콤마 구분 문자열 형태 (host:port,host:port)
   return raw.split(',').map(pair => {
-    const [host, port] = pair.split(':');
+    const [host, port] = pair.replace('redis://', '').split(':');
     return { host, port: Number(port) };
   });
 })();
+console.log('🟢 [config/keys.js] redisNodes:', redisNodes);
 
 
 module.exports = {
