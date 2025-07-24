@@ -9,20 +9,13 @@ const { createClient } = require("redis");
 const path = require("path");
 const { router: roomsRouter, initializeSocket } = require("./routes/api/rooms");
 const routes = require("./routes");
-
-// 캐시 서비스 import 추가
 const cacheService = require("./services/cacheService");
 
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5001;
-const io = socketIO(server, { cors: corsOptions });
-app.set('io', io); // Express 앱에서 io 객체를 참조할 수 있도록 설정
 
-// trust proxy 설정 추가
-app.set("trust proxy", 1);
-
-// CORS 설정
+// **CORS 설정을 먼저 선언**
 const corsOptions = {
   origin: [
     'https://bootcampchat-fe.run.goorm.site',
@@ -50,15 +43,18 @@ const corsOptions = {
   exposedHeaders: ["x-auth-token", "x-session-id"],
 };
 
-// 기본 미들웨어
+// **CORS 옵션이 선언된 후에 socketIO 생성**
+const io = socketIO(server, { cors: corsOptions });
+app.set('io', io);
+
+app.set("trust proxy", 1);
+
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// OPTIONS 요청에 대한 처리
 app.options("*", cors(corsOptions));
 
-// 정적 파일 제공
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // 요청 로깅
@@ -80,7 +76,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-// API 라우트 마운트
 app.use("/api", routes);
 
 // 404 에러 핸들러
