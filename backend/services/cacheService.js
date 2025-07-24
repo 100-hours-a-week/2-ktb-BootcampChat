@@ -10,6 +10,7 @@ class CacheService {
       MESSAGE_BATCH: 600,    // 메시지 배치 10분
       RECENT_MESSAGES: 300   // 최근 메시지 5분
     };
+    this.MAX_CACHED_MESSAGES = 50; // 최근 메시지 캐시에 저장할 최대 메시지 수
     
     this.KEYS = {
       MESSAGES: (roomId, page = 0) => `messages:${roomId}:${page}`,
@@ -147,25 +148,14 @@ class CacheService {
 
   async addMessageToCache(roomId, message) {
     try {
-      // 디버깅: 메시지 객체 확인
-      console.log('Caching message:', typeof message, message);
-      
       const key = this.KEYS.RECENT_MESSAGES(roomId);
       const cached = await redisClient.get(key);
       
       let messages = [];
-      if (cached) {
-        // 디버깅: 캐시된 데이터 확인
-        console.log('Cached data type:', typeof cached, 'Value:', cached);
-        
-        if (typeof cached === 'string') {
-          messages = JSON.parse(cached);
-        } else if (Array.isArray(cached)) {
-          messages = cached;
-        } else {
-          console.warn('Unexpected cached data format, starting fresh');
-          messages = [];
-        }
+      if (Array.isArray(cached)) {
+        messages = cached;
+      } else if (cached) {
+        console.warn(`[Cache] Unexpected data format for recent messages in room ${roomId}, starting fresh.`);
       }
       
       messages.push(message);
@@ -173,7 +163,13 @@ class CacheService {
         messages = messages.slice(-this.MAX_CACHED_MESSAGES);
       }
       
-      await redisClient.setEx(key, this.TTL.RECENT_MESSAGES, messages);
+      // redisClient는 자동으로 객체를 JSON 문자열로 변환하지만, 명시적으로 처리하는 것이 안전합니다.
+      await redisClient.setEx(key, this.TTL.RECENT_MESSAGES, JSON.stringify(messages));
+
+      // 첫 페이지 캐시 무효화 (가장 중요!)
+      // 새 메시지가 추가되었으므로, 재접속 시 최신 데이터를 불러오도록 페이지 0의 캐시를 삭제합니다.
+      await this.invalidateMessageBatch(roomId, 0);
+      console.log(`[Cache] Message added and batch invalidated for room ${roomId}`);
     } catch (error) {
       console.error('[Cache] Add message to cache error:', error);
     }
