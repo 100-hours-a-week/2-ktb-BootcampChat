@@ -1,7 +1,7 @@
 // backend/utils/redisCluster.js
 const IORedis = require('ioredis');
 const { redisNodes, redisPassword } = require('../config/keys');
-const { MockRedisClient } = require('./redisClient'); // MockRedisClient이 정의된 파일에서 불러옵니다
+const MockRedisClient = require('./MockRedisClient');
 
 /**
  * Redis 클러스터 모드용 클라이언트
