@@ -13,7 +13,7 @@ const aiService = require('../services/aiService');
 module.exports = function(io) {
   const connectedUsers = new Map();
   const streamingSessions = new Map();
-  const userRooms = new Map();
+  
   const messageQueues = new Map();
   const messageLoadRetries = new Map();
   
@@ -473,7 +473,7 @@ module.exports = function(io) {
               throw new Error('Unauthorized');
           }
 
-          const currentRoom = userRooms.get(socket.user.id);
+          const currentRoom = Array.from(socket.rooms).find(r => r !== socket.id);
           if (currentRoom === roomId) {
               logDebug('already in room', {
                   userId: socket.user.id,
@@ -485,12 +485,7 @@ module.exports = function(io) {
 
           // 기존 방에서 나가기
           if (currentRoom) {
-              logDebug('leaving current room', {
-                  userId: socket.user.id,
-                  roomId: currentRoom
-              });
               socket.leave(currentRoom);
-              userRooms.delete(socket.user.id);
 
               socket.to(currentRoom).emit('userLeft', {
                   userId: socket.user.id,
@@ -512,11 +507,9 @@ module.exports = function(io) {
               throw new Error('채팅방을 찾을 수 없습니다.');
           }
 
-          // 🌟 이제 cacheService가 정의되어 있으므로 호출할 수 있습니다.
           await cacheService.cacheRoomInfo(roomId, room); // <--- 여기가 원래 515번째 줄
 
           socket.join(roomId);
-          userRooms.set(socket.user.id, roomId);
 
           // 입장 메시지 생성
           const joinMessage = new Message({
@@ -718,7 +711,7 @@ module.exports = function(io) {
           throw new Error('Unauthorized');
         }
 
-        const currentRoom = userRooms?.get(socket.user.id);
+        const currentRoom = Array.from(socket.rooms).find(r => r !== socket.id);
         if (!currentRoom || currentRoom !== roomId) {
           console.log(`User ${socket.user.id} is not in room ${roomId}`);
           return;
@@ -728,7 +721,6 @@ module.exports = function(io) {
         const room = await getRoomInfo(roomId, socket.user.id);
 
         socket.leave(roomId);
-        userRooms.delete(socket.user.id);
 
         // 퇴장 메시지 생성 및 저장
         const leaveMessage = await Message.create({
@@ -791,14 +783,11 @@ module.exports = function(io) {
         // 사용자 캐시 무효화 및 방 제거 (로그아웃 처리 시)
         if (socket.user && socket.user.id) {
             try {
-                // 🌟 cacheService가 이제 유효합니다.
-                // 따라서 invalidateUserCache 호출 시 TypeError가 발생하지 않을 것입니다.
                 await cacheService.invalidateUserCache(socket.user.id); // <--- 여기가 원래 844번째 줄
 
-                const roomId = userRooms.get(socket.user.id);
+                const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
                 if (roomId) {
                     socket.leave(roomId);
-                    userRooms.delete(socket.user.id);
 
                     // 방에서 나갔다는 메시지 전송
                     const leaveMessage = new Message({

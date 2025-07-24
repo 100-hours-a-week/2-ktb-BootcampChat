@@ -80,7 +80,21 @@ app.get("/health", (req, res) => {
 app.use("/api", routes);
 
 // Socket.IO 설정
+const { createAdapter } = require("@socket.io/redis-adapter");
+const { Cluster } = require("ioredis");
+const { redisNodes, redisPassword } = require("./config/keys");
+
 const io = socketIO(server, { cors: corsOptions });
+
+if (redisNodes && redisNodes.length > 0) {
+  const cluster = new Cluster(redisNodes, {
+    redisOptions: { password: redisPassword },
+  });
+  const redisAdapter = createAdapter(cluster, cluster.nodes("master")[0]);
+  io.adapter(redisAdapter);
+  console.log("Socket.IO Redis adapter connected");
+}
+
 require("./sockets/chat")(io);
 
 // Socket.IO 객체 전달
