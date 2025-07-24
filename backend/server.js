@@ -79,8 +79,15 @@ app.get("/health", (req, res) => {
 // API 라우트 마운트
 app.use("/api", routes);
 
-// Socket.IO 설정
-const io = socketIO(server, { cors: corsOptions });
+// Socket.IO 설정 (연결 안정성 개선)
+const io = socketIO(server, { 
+  cors: corsOptions,
+  connectTimeout: 5000,
+  timeout: 10000,
+  pingTimeout: 3000,
+  pingInterval: 2000,
+  transports: ['websocket', 'polling']
+});
 require("./sockets/chat")(io);
 
 // Socket.IO 객체 전달

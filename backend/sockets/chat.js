@@ -14,8 +14,18 @@ const IORedis = require('ioredis'); // ioredis 직접 임포트
 const { redisNodes, redisPassword } = require('../config/keys'); // Redis 설정 임포트
 
 module.exports = function(io) {
+  // Redis 헬스체크 함수
+  const checkRedisHealth = async () => {
+    try {
+      await redisClient.ping();
+      return true;
+    } catch (error) {
+      console.error('Redis health check failed:', error);
+      return false;
+    }
+  };
+
   // Socket.IO Redis 어댑터용 클라이언트 생성
-  // ioredis.Cluster를 직접 사용하여 pub/sub 클라이언트를 생성합니다.
   const pubClient = new IORedis.Cluster(redisNodes, {
     redisOptions: { password: redisPassword },
     scaleReads: 'slave',
@@ -35,7 +45,17 @@ module.exports = function(io) {
   pubClient.on('error', (err) => console.error('Redis Pub Client Error:', err));
   subClient.on('error', (err) => console.error('Redis Sub Client Error:', err));
 
-  io.adapter(createAdapter(pubClient, subClient));
+  // Redis 상태 확인 후 어댑터 설정
+  checkRedisHealth().then(isHealthy => {
+    if (isHealthy) {
+      io.adapter(createAdapter(pubClient, subClient));
+      console.log('✅ Redis adapter initialized');
+    } else {
+      console.warn('⚠️ Redis unavailable, using memory adapter');
+    }
+  }).catch(err => {
+    console.error('Redis adapter setup failed:', err);
+  });
 
   // 인메모리 객체들을 Redis 키로 대체합니다.
   // 이를 통해 여러 서버 인스턴스 간에 상태를 공유할 수 있습니다.
@@ -357,8 +377,12 @@ module.exports = function(io) {
     }
   };
 
-  // 미들웨어: 소켓 연결 시 인증 처리 (기존과 동일)
+  // 미들웨어: 소켓 연결 시 인증 처리 (타임아웃 및 안정성 개선)
   io.use(async (socket, next) => {
+    const authTimeout = setTimeout(() => {
+      next(new Error('Authentication timeout'));
+    }, 5000);
+
     try {
       const token = socket.handshake.auth.token;
       const sessionId = socket.handshake.auth.sessionId;
@@ -372,21 +396,35 @@ module.exports = function(io) {
         return next(new Error('Invalid token'));
       }
 
+      // 중복 로그인 처리 (타임아웃 단축)
       const existingSocketId = await redisClient.hget(CONNECTED_USERS_KEY, decoded.user.id);
       if (existingSocketId) {
         const existingSocket = io.sockets.sockets.get(existingSocketId);
-        if (existingSocket) {
-          await handleDuplicateLogin(existingSocket, socket);
+        if (existingSocket && existingSocket.id !== socket.id) {
+          existingSocket.emit('session_ended', {
+            reason: 'duplicate_login',
+            message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.'
+          });
+          existingSocket.disconnect(true);
         }
       }
 
-      const validationResult = await SessionService.validateSession(decoded.user.id, sessionId);
+      // 세션 검증 타임아웃 추가
+      const sessionTimeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Session validation timeout')), 3000);
+      });
+
+      const validationResult = await Promise.race([
+        SessionService.validateSession(decoded.user.id, sessionId),
+        sessionTimeout
+      ]);
+      
       if (!validationResult.isValid) {
         console.error('Session validation failed:', validationResult);
         return next(new Error(validationResult.message || 'Invalid session'));
       }
 
-      const user = await User.findById(decoded.user.id).read('secondaryPreferred'); // 읽기 작업을 Secondary 노드로 분산
+      const user = await User.findById(decoded.user.id).read('secondaryPreferred');
       if (!user) {
         return next(new Error('User not found'));
       }
@@ -400,9 +438,11 @@ module.exports = function(io) {
       };
 
       await SessionService.updateLastActivity(decoded.user.id);
+      clearTimeout(authTimeout);
       next();
 
     } catch (error) {
+      clearTimeout(authTimeout);
       console.error('Socket authentication error:', error);
       
       if (error.name === 'TokenExpiredError') {
@@ -418,20 +458,32 @@ module.exports = function(io) {
   });
   
   io.on('connection', (socket) => {
+    console.log(`✅ Socket connected: ${socket.id}, User: ${socket.user?.id} (${socket.user?.name})`);
+    
     logDebug('socket connected', {
       socketId: socket.id,
       userId: socket.user?.id,
-      userName: socket.user?.name
+      userName: socket.user?.name,
+      userAgent: socket.handshake.headers['user-agent'],
+      ip: socket.handshake.address
+    });
+
+    // 연결 에러 모니터링
+    socket.on('connect_error', (error) => {
+      console.error(`❌ Connection error for ${socket.id}:`, error);
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log(`🔌 Socket disconnected: ${socket.id}, Reason: ${reason}, User: ${socket.user?.id}`);
     });
 
     if (socket.user) {
         (async () => {
             try {
-                // 중복 로그인 처리는 io.use에서 이미 처리되었지만,
-                // 연결 시점에 Redis에 현재 소켓 ID를 확실히 저장합니다.
                 await redisClient.hset(CONNECTED_USERS_KEY, socket.user.id, socket.id);
+                console.log(`📝 User ${socket.user.id} socket ID updated in Redis`);
             } catch (err) {
-                console.error("Error setting user socket ID in Redis:", err);
+                console.error("❌ Error setting user socket ID in Redis:", err);
             }
         })();
     }
