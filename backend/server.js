@@ -89,10 +89,10 @@ const io = socketIO(server, { cors: corsOptions });
 if (redisNodes && redisNodes.length > 0) {
   const cluster = new Cluster(redisNodes, {
     redisOptions: { password: redisPassword },
+    scaleReads: 'slave' // 읽기 작업을 슬레이브 노드로 분산
   });
-  const redisAdapter = createAdapter(cluster, cluster.nodes("master")[0]);
-  io.adapter(redisAdapter);
-  console.log("Socket.IO Redis adapter connected");
+  io.adapter(createAdapter(cluster));
+  console.log("Socket.IO Redis adapter connected to cluster");
 }
 
 require("./sockets/chat")(io);
