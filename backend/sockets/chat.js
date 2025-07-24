@@ -50,7 +50,6 @@ module.exports = function(io) {
   const MAX_RETRIES = 3;
   const MESSAGE_LOAD_TIMEOUT = 30000;
   const RETRY_DELAY = 2000;
-  const DUPLICATE_LOGIN_TIMEOUT = 10000;
 
   // 로깅 유틸리티 함수
   const logDebug = (action, data) => {
@@ -326,37 +325,6 @@ module.exports = function(io) {
     }
   };
 
-  // 중복 로그인 처리 함수 (기존과 동일)
-  const handleDuplicateLogin = async (existingSocket, newSocket) => {
-    try {
-      existingSocket.emit('duplicate_login', {
-        type: 'new_login_attempt',
-        deviceInfo: newSocket.handshake.headers['user-agent'],
-        ipAddress: newSocket.handshake.address,
-        timestamp: Date.now()
-      });
-
-      return new Promise((resolve) => {
-        setTimeout(async () => {
-          try {
-            existingSocket.emit('session_ended', {
-              reason: 'duplicate_login',
-              message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.'
-            });
-            existingSocket.disconnect(true);
-            resolve();
-          } catch (error) {
-            console.error('Error during session termination:', error);
-            resolve();
-          }
-        }, DUPLICATE_LOGIN_TIMEOUT);
-      });
-    } catch (error) {
-      console.error('Duplicate login handling error:', error);
-      throw error;
-    }
-  };
-
   // 미들웨어: 소켓 연결 시 인증 처리 (기존과 동일)
   io.use(async (socket, next) => {
     try {
@@ -372,12 +340,15 @@ module.exports = function(io) {
         return next(new Error('Invalid token'));
       }
 
+      // Check for existing connection across all instances
       const existingSocketId = await redisClient.hget(CONNECTED_USERS_KEY, decoded.user.id);
-      if (existingSocketId) {
-        const existingSocket = io.sockets.sockets.get(existingSocketId);
-        if (existingSocket) {
-          await handleDuplicateLogin(existingSocket, socket);
-        }
+      if (existingSocketId && existingSocketId !== socket.id) {
+        // Emit an event to the specific socket ID.
+        // The redis adapter will route this to the correct instance.
+        io.to(existingSocketId).emit('force_disconnect', {
+          reason: 'duplicate_login',
+          message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.',
+        });
       }
 
       const validationResult = await SessionService.validateSession(decoded.user.id, sessionId);
@@ -398,6 +369,9 @@ module.exports = function(io) {
         sessionId: sessionId,
         profileImage: user.profileImage
       };
+
+      // Set the new socket ID in Redis immediately after validation
+      await redisClient.hset(CONNECTED_USERS_KEY, decoded.user.id, socket.id);
 
       await SessionService.updateLastActivity(decoded.user.id);
       next();
@@ -424,18 +398,16 @@ module.exports = function(io) {
       userName: socket.user?.name
     });
 
-    if (socket.user) {
-        (async () => {
-            try {
-                // 중복 로그인 처리는 io.use에서 이미 처리되었지만,
-                // 연결 시점에 Redis에 현재 소켓 ID를 확실히 저장합니다.
-                await redisClient.hset(CONNECTED_USERS_KEY, socket.user.id, socket.id);
-            } catch (err) {
-                console.error("Error setting user socket ID in Redis:", err);
-            }
-        })();
-    }
-
+    // Add listener for forced disconnection
+    socket.on('force_disconnect', (data) => {
+      logDebug('force disconnect received', { socketId: socket.id, userId: socket.user?.id, reason: data.reason });
+      socket.emit('session_ended', {
+          reason: data.reason,
+          message: data.message
+      });
+      socket.disconnect(true);
+    });
+    
     // 이전 메시지 로딩 처리 (캐싱 적용)
     socket.on('fetchPreviousMessages', async ({ roomId, before }) => {
       const queueKey = `${roomId}:${socket.user.id}`;
