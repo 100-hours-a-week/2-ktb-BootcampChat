@@ -7,6 +7,81 @@ const fs = require('fs');
 const { promisify } = require('util');
 const crypto = require('crypto');
 const { uploadDir } = require('../middleware/upload');
+const { PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { s3Bucket, s3Folder, cloudfrontBaseUrl } = require('../config/keys');
+
+const s3 = require('../services/s3Client');
+
+const generateSafeFilename = (originalFilename) => {
+  const ext = path.extname(originalFilename || '').toLowerCase();
+  const timestamp = Date.now();
+  const randomBytes = crypto.randomBytes(8).toString('hex');
+  return `${timestamp}_${randomBytes}${ext}`;
+};
+
+exports.presignUpload = async (req, res) => {
+  try {
+    const { filename, contentType } = req.query;
+    if (!filename || !contentType) {
+      return res.status(400).json({ success: false, message: 'filename, contentType 필요' });
+    }
+
+    // 스키마가 기대하는 형식(숫자_hex.확장자)으로 키 생성
+    const key = generateSafeFilename(filename);
+    const sub_url = `${s3Folder}/${key}`;
+
+    const cmd = new PutObjectCommand({
+      Bucket: s3Bucket,
+      Key: sub_url,
+      ContentType: contentType,
+      ACL: 'private'
+    });
+
+    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 900 });
+    res.json({ success: true, uploadUrl, key });
+  } catch (err) {
+    console.error('presignUpload error', err);
+    res.status(500).json({ success: false, message: 'Presign URL 생성 실패' });
+  }
+};
+
+exports.completeUpload = async (req, res) => {
+  try {
+    const { key, originalName, size, mimetype } = req.body;
+    if (!key || !originalName || !size || !mimetype) {
+      return res.status(400).json({ success: false, message: '메타데이터 불충분' });
+    }
+
+    // DB에 메타 저장
+    const file = new File({
+      filename: key,
+      originalname: originalName,
+      mimetype,
+      size,
+      user: req.user.id,
+      path: key  // S3 키
+    });
+    await file.save();
+
+    res.json({
+    success: true,
+    message: '메타 저장 완료',
+    file: {
+      _id: file._id,
+      filename: file.filename,
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+      uploadDate: file.uploadDate,
+      url: `${cloudfrontBaseUrl}/${file.filename}`
+  }
+});
+  } catch (err) {
+    console.error('completeUpload error', err);
+    res.status(500).json({ success: false, message: '메타 저장 실패' });
+  }
+};
 
 const fsPromises = {
   writeFile: promisify(fs.writeFile),
@@ -20,13 +95,6 @@ const isPathSafe = (filepath, directory) => {
   const resolvedPath = path.resolve(filepath);
   const resolvedDirectory = path.resolve(directory);
   return resolvedPath.startsWith(resolvedDirectory);
-};
-
-const generateSafeFilename = (originalFilename) => {
-  const ext = path.extname(originalFilename || '').toLowerCase();
-  const timestamp = Date.now();
-  const randomBytes = crypto.randomBytes(8).toString('hex');
-  return `${timestamp}_${randomBytes}${ext}`;
 };
 
 // 개선된 파일 정보 조회 함수
@@ -55,22 +123,22 @@ const getFileFromRequest = async (req) => {
     if (!file) {
       throw new Error('File not found in database');
     }
-
-    // 채팅방 권한 검증을 위한 메시지 조회
-    const message = await Message.findOne({ file: file._id });
-    if (!message) {
-      throw new Error('File message not found');
-    }
-
-    // 사용자가 해당 채팅방의 참가자인지 확인
-    const room = await Room.findOne({
-      _id: message.room,
-      participants: req.user.id
-    });
-
-    if (!room) {
-      throw new Error('Unauthorized access');
-    }
+//
+//    // 채팅방 권한 검증을 위한 메시지 조회
+//    const message = await Message.findOne({ file: file._id });
+//    if (!message) {
+//      throw new Error('File message not found');
+//    }
+//
+//    // 사용자가 해당 채팅방의 참가자인지 확인
+//    const room = await Room.findOne({
+//      _id: message.room,
+//      participants: req.user.id
+//    });
+//
+//    if (!room) {
+//      throw new Error('Unauthorized access');
+//    }
 
     return { file, filePath };
   } catch (error) {
@@ -139,31 +207,10 @@ exports.uploadFile = async (req, res) => {
 
 exports.downloadFile = async (req, res) => {
   try {
-    const { file, filePath } = await getFileFromRequest(req);
-    const contentDisposition = file.getContentDisposition('attachment');
+    const { file } = await getFileFromRequest(req);
 
-    res.set({
-      'Content-Type': file.mimetype,
-      'Content-Length': file.size,
-      'Content-Disposition': contentDisposition,
-      'Cache-Control': 'private, no-cache, no-store, must-revalidate',
-      'Pragma': 'no-cache',
-      'Expires': '0'
-    });
-
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.on('error', (error) => {
-      console.error('File streaming error:', error);
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          message: '파일 스트리밍 중 오류가 발생했습니다.'
-        });
-      }
-    });
-
-    fileStream.pipe(res);
-
+    const fileUrl = `${cloudfrontBaseUrl}/${file.filename}`;
+    return res.redirect(fileUrl);
   } catch (error) {
     handleFileError(error, res);
   }
@@ -171,7 +218,7 @@ exports.downloadFile = async (req, res) => {
 
 exports.viewFile = async (req, res) => {
   try {
-    const { file, filePath } = await getFileFromRequest(req);
+    const { file } = await getFileFromRequest(req);
 
     if (!file.isPreviewable()) {
       return res.status(415).json({
@@ -180,27 +227,9 @@ exports.viewFile = async (req, res) => {
       });
     }
 
-    const contentDisposition = file.getContentDisposition('inline');
-        
-    res.set({
-      'Content-Type': file.mimetype,
-      'Content-Disposition': contentDisposition,
-      'Content-Length': file.size,
-      'Cache-Control': 'public, max-age=31536000, immutable'
-    });
-
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.on('error', (error) => {
-      console.error('File streaming error:', error);
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          message: '파일 스트리밍 중 오류가 발생했습니다.'
-        });
-      }
-    });
-
-    fileStream.pipe(res);
+    const fileUrl = `${cloudfrontBaseUrl}/${file.filename}`;
+    // 302 Redirect
+    return res.redirect(fileUrl);
 
   } catch (error) {
     handleFileError(error, res);

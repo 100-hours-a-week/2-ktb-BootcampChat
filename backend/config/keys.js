@@ -15,4 +15,10 @@ module.exports = {
   redisPort: process.env.REDIS_PORT,
   openaiApiKey: process.env.OPENAI_API_KEY,
   vectorDbEndpoint: process.env.VECTOR_DB_ENDPOINT,
+  s3Region: process.env.S3_REGION,
+  s3Bucket: process.env.S3_BUCKET,
+  s3Folder: process.env.S3_FOLDER || 'uploads',
+  awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  cloudfrontBaseUrl: process.env.CLOUDFRONT_BASE_URL
 };

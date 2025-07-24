@@ -3,6 +3,7 @@ const User = require('../models/User');
 const { upload } = require('../middleware/upload');
 const path = require('path');
 const fs = require('fs').promises;
+const { s3Bucket, s3Folder, cloudfrontBaseUrl } = require('../config/keys');
 
 // 회원가입
 exports.register = async (req, res) => {
@@ -107,13 +108,16 @@ exports.getProfile = async (req, res) => {
       });
     }
 
+    key = user.profileImage;
+    const profileImage = `${cloudfrontBaseUrl}/${key}`;
+
     res.json({
       success: true,
       user: {
         id: user._id,
         name: user.name,
         email: user.email,
-        profileImage: user.profileImage
+        profileImage
       }
     });
 
@@ -169,33 +173,26 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
-// 프로필 이미지 업로드
 exports.uploadProfileImage = async (req, res) => {
   try {
-    if (!req.file) {
+    const { key, size, mimetype } = req.body;
+
+    if (!key || !size || !mimetype) {
       return res.status(400).json({
         success: false,
-        message: '이미지가 제공되지 않았습니다.'
+        message: '파일 메타데이터가 누락되었습니다.'
       });
     }
 
-    // 파일 유효성 검사
-    const fileSize = req.file.size;
-    const fileType = req.file.mimetype;
     const maxSize = 5 * 1024 * 1024; // 5MB
-
-    if (fileSize > maxSize) {
-      // 업로드된 파일 삭제
-      await fs.unlink(req.file.path);
+    if (size > maxSize) {
       return res.status(400).json({
         success: false,
         message: '파일 크기는 5MB를 초과할 수 없습니다.'
       });
     }
 
-    if (!fileType.startsWith('image/')) {
-      // 업로드된 파일 삭제
-      await fs.unlink(req.file.path);
+    if (!mimetype.startsWith('image/')) {
       return res.status(400).json({
         success: false,
         message: '이미지 파일만 업로드할 수 있습니다.'
@@ -204,49 +201,29 @@ exports.uploadProfileImage = async (req, res) => {
 
     const user = await User.findById(req.user.id);
     if (!user) {
-      // 업로드된 파일 삭제
-      await fs.unlink(req.file.path);
       return res.status(404).json({
         success: false,
         message: '사용자를 찾을 수 없습니다.'
       });
     }
 
-    // 기존 프로필 이미지가 있다면 삭제
-    if (user.profileImage) {
-      const oldImagePath = path.join(__dirname, '..', user.profileImage);
-      try {
-        await fs.access(oldImagePath);
-        await fs.unlink(oldImagePath);
-      } catch (error) {
-        console.error('Old profile image delete error:', error);
-      }
-    }
-
-    // 새 이미지 경로 저장
-    const imageUrl = `/uploads/${req.file.filename}`;
-    user.profileImage = imageUrl;
+    // 새 S3 Key 저장
+    user.profileImage = key;
     await user.save();
+
+    const imageUrl = `${cloudfrontBaseUrl}/${key}`;
 
     res.json({
       success: true,
       message: '프로필 이미지가 업데이트되었습니다.',
-      imageUrl: user.profileImage
+      imageUrl
     });
 
   } catch (error) {
     console.error('Profile image upload error:', error);
-    // 업로드 실패 시 파일 삭제
-    if (req.file) {
-      try {
-        await fs.unlink(req.file.path);
-      } catch (unlinkError) {
-        console.error('File delete error:', unlinkError);
-      }
-    }
     res.status(500).json({
       success: false,
-      message: '이미지 업로드 중 오류가 발생했습니다.'
+      message: '프로필 이미지 저장 중 오류가 발생했습니다.'
     });
   }
 };
@@ -263,14 +240,6 @@ exports.deleteProfileImage = async (req, res) => {
     }
 
     if (user.profileImage) {
-      const imagePath = path.join(__dirname, '..', user.profileImage);
-      try {
-        await fs.access(imagePath);
-        await fs.unlink(imagePath);
-      } catch (error) {
-        console.error('Profile image delete error:', error);
-      }
-
       user.profileImage = '';
       await user.save();
     }
@@ -298,17 +267,6 @@ exports.deleteAccount = async (req, res) => {
         success: false,
         message: '사용자를 찾을 수 없습니다.'
       });
-    }
-
-    // 프로필 이미지가 있다면 삭제
-    if (user.profileImage) {
-      const imagePath = path.join(__dirname, '..', user.profileImage);
-      try {
-        await fs.access(imagePath);
-        await fs.unlink(imagePath);
-      } catch (error) {
-        console.error('Profile image delete error:', error);
-      }
     }
 
     await user.deleteOne();

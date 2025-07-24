@@ -31,4 +31,18 @@ router.delete('/:id',
   fileController.deleteFile
 );
 
+// 1) Presign URL 요청
+router.get(
+  '/presign-upload',
+  auth,
+  fileController.presignUpload
+);
+
+// 2) 업로드 완료 후 메타 등록
+router.post(
+  '/complete-upload',
+  auth,
+  fileController.completeUpload
+);
+
 module.exports = router;
