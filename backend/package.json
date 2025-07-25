@@ -12,7 +12,7 @@
     "@aws-sdk/s3-request-presigner": "^3.850.0",
     "@socket.io/redis-adapter": "^8.3.0",
     "axios": "^1.4.0",
-    "bcryptjs": "^2.4.3",
+    "bcrypt": "^5.1.1",
     "bull": "^4.10.4",
     "compression": "^1.7.5",
     "cors": "^2.8.5",

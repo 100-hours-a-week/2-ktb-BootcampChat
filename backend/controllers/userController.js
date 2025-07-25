@@ -1,4 +1,3 @@
-const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { upload } = require('../middleware/upload');
 const path = require('path');
@@ -72,9 +71,7 @@ exports.register = async (req, res) => {
       password,
       profileImage: '' // 기본 프로필 이미지 없음
     });
-
-    const salt = await bcrypt.genSalt(10);
-    newUser.password = await bcrypt.hash(password, salt);
+    // 비밀번호 해싱은 User 모델의 pre-save hook에서 자동으로 처리됩니다.
     await newUser.save();
 
     res.status(201).json({

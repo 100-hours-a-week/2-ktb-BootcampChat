@@ -201,10 +201,11 @@ router.post('/', auth, async (req, res) => {
     });
 
     const savedRoom = await newRoom.save();
-    const populatedRoom = await Room.findById(savedRoom._id)
-      .populate('creator', 'name email')
-      .populate('participants', 'name email');
-    
+    // DB 조회를 줄이기 위해, 저장된 인스턴스에 바로 populate를 실행합니다.
+    const populatedRoom = await savedRoom.populate([
+      { path: 'creator', select: 'name email' },
+      { path: 'participants', select: 'name email' }
+    ]);
     // Socket.IO를 통해 새 채팅방 생성 알림
     if (io) {
       io.to('room-list').emit('roomCreated', {

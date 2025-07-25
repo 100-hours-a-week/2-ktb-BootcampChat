@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const Encryption = require('../utils/encryption'); // 개선된 암호화 유틸 사용
 
 const UserSchema = new mongoose.Schema({

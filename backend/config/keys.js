@@ -39,4 +39,11 @@ module.exports = {
   redisNodes,
   openaiApiKey: process.env.OPENAI_API_KEY,
   vectorDbEndpoint: process.env.VECTOR_DB_ENDPOINT,
+  // AWS S3 설정 추가
+  awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  s3Region: process.env.S3_REGION,
+  s3Bucket: process.env.S3_BUCKET,
+  cloudfrontBaseUrl: process.env.CLOUDFRONT_BASE_URL,
+  s3Folder: process.env.S3_FOLDER || 'uploads',
 };
