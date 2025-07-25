@@ -43,13 +43,23 @@ jobs:
           echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
           echo "BRANCH=$BRANCH_NAME" >> $GITHUB_ENV
 
-      - name: Build Next.js App
+      - name: Create .env.local
+        working-directory: ./frontend
         run: |
-          cd frontend
+          cat <<EOF > .env.local
+          NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_ENCRYPTION_KEY=${{ secrets.NEXT_PUBLIC_ENCRYPTION_KEY }}
+          NEXT_PUBLIC_PASSWORD_SALT=${{ secrets.NEXT_PUBLIC_PASSWORD_SALT }}
+          EOF
+
+      - name: Build Next.js App
+        working-directory: ./frontend
+        run: |
           npm install
           npm run build
 
       - name: Upload to S3
+        working-directory: ./frontend
         run: |
           if [[ "$ENV" == "PROD" ]]; then
             BUCKET_NAME="ktb-service-hosting"
@@ -58,7 +68,6 @@ jobs:
           fi
 
           echo "📦 Syncing to S3 bucket: $BUCKET_NAME"
-          cd frontend        
           aws s3 sync out/ s3://$BUCKET_NAME/ --delete
 
       - name: Syncing to Cloudfront

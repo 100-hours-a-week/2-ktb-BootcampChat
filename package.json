@@ -21,6 +21,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@vapor-ui/core": "^0.3.1",
+    "reactstrap": "^9.2.3",
     "@aws-sdk/client-s3": "^3.850.0",
     "@aws-sdk/s3-request-presigner": "^3.850.0",
     "@vapor-ui/core": "^0.3.1",

@@ -119,17 +119,36 @@ const ChatInput = forwardRef(
               throw new Error("파일이 선택되지 않았습니다.");
             }
 
+            setUploading(true);
+            setUploadError(null);
+
+            // Presigned URL 방식으로 업로드
+            const result = await fileService.uploadFile(
+              file.file,
+              setUploadProgress
+            );
+
+            setUploading(false);
+            setUploadProgress(0);
+
+            if (!result.success) {
+              setUploadError(result.message || "업로드에 실패했습니다.");
+              return;
+            }
+
+            // ✅ 업로드 성공 후 메시지 전송
             onSubmit({
               type: "file",
               content: message.trim(),
-              fileData: file,
+              fileData: result.data.file, // presigned 업로드 후 받은 파일 정보
             });
 
             setMessage("");
             setFiles([]);
           } catch (error) {
             console.error("File submit error:", error);
-            setUploadError(error.message);
+            setUploadError(error.message || "업로드 중 오류가 발생했습니다.");
+            setUploading(false);
           }
         } else if (message.trim()) {
           onSubmit({
