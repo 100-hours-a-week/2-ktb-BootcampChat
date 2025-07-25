@@ -2,6 +2,7 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { jwtSecret } = require('../config/keys');
 const SessionService = require('../services/sessionService');
+const { s3Bucket, s3Folder, cloudfrontBaseUrl } = require('../config/keys');
 
 const authController = {
   async register(req, res) {
@@ -261,6 +262,16 @@ const authController = {
         'x-session-id': sessionInfo.sessionId
       });
 
+
+    const key = user.profileImage;
+    let profileImage = `${cloudfrontBaseUrl}/${key}`;
+
+    if (key === '') {
+        profileImage = key;
+    }
+
+
+      // 로그인 캐시
       res.json({
         success: true,
         token,
@@ -269,7 +280,7 @@ const authController = {
           _id: user._id,
           name: user.name,
           email: user.email,
-          profileImage: user.profileImage
+          profileImage
         }
       });
 
@@ -393,13 +404,21 @@ const authController = {
         res.set('X-Profile-Update-Required', 'true');
       }
 
+    const key = user.profileImage;
+    let profileImage = `${cloudfrontBaseUrl}/${key}`;
+
+    if (key === '') {
+        profileImage = key;
+    }
+
+    // 토큰 조회 캐시
       res.json({
         success: true,
         user: {
           _id: user._id,
           name: user.name,
           email: user.email,
-          profileImage: user.profileImage
+          profileImage
         }
       });
 
@@ -475,6 +494,15 @@ const authController = {
         }
       );
 
+
+      const key = user.profileImage;
+      let profileImage = `${cloudfrontBaseUrl}/${key}`;
+
+      if (key === '') {
+          profileImage = key;
+      }
+
+      // 토큰 재발급 캐시
       res.json({
         success: true,
         message: '토큰이 갱신되었습니다.',
@@ -484,7 +512,7 @@ const authController = {
           _id: user._id,
           name: user.name,
           email: user.email,
-          profileImage: user.profileImage
+          profileImage
         }
       });
 

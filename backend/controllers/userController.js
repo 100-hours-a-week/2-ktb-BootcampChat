@@ -108,8 +108,13 @@ exports.getProfile = async (req, res) => {
       });
     }
 
-    key = user.profileImage;
-    const profileImage = `${cloudfrontBaseUrl}/${key}`;
+    // 프로필 조회 캐시
+    const key = user.profileImage;
+    let profileImage = `${cloudfrontBaseUrl}/${key}`;
+
+    if (key === '') {
+        profileImage = key;
+    }
 
     res.json({
       success: true,
@@ -153,6 +158,14 @@ exports.updateProfile = async (req, res) => {
     user.name = name.trim();
     await user.save();
 
+    // 프로필 업데이트 캐시
+    const key = user.profileImage;
+    let profileImage = `${cloudfrontBaseUrl}/${key}`;
+
+    if (key === '') {
+        profileImage = key;
+    }
+
     res.json({
       success: true,
       message: '프로필이 업데이트되었습니다.',
@@ -160,7 +173,7 @@ exports.updateProfile = async (req, res) => {
         id: user._id,
         name: user.name,
         email: user.email,
-        profileImage: user.profileImage
+        profileImage
       }
     });
 
@@ -211,6 +224,7 @@ exports.uploadProfileImage = async (req, res) => {
     user.profileImage = key;
     await user.save();
 
+    // 프로필 이미지 업데이트 캐시
     const imageUrl = `${cloudfrontBaseUrl}/${key}`;
 
     res.json({
@@ -238,6 +252,8 @@ exports.deleteProfileImage = async (req, res) => {
         message: '사용자를 찾을 수 없습니다.'
       });
     }
+
+    // 프로필 이미지 삭제 캐시
 
     if (user.profileImage) {
       user.profileImage = '';
@@ -269,6 +285,7 @@ exports.deleteAccount = async (req, res) => {
       });
     }
 
+    // 회원 탈퇴 캐시
     await user.deleteOne();
 
     res.json({

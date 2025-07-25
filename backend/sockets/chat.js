@@ -6,14 +6,17 @@ const jwt = require('jsonwebtoken');
 const { jwtSecret } = require('../config/keys');
 const redisClient = require('../utils/redisClient');
 const SessionService = require('../services/sessionService');
+const SocketStateService = require('../services/socketStateService');
 const aiService = require('../services/aiService');
 
 module.exports = function(io) {
-  const connectedUsers = new Map();
-  const streamingSessions = new Map();
-  const userRooms = new Map();
-  const messageQueues = new Map();
-  const messageLoadRetries = new Map();
+  // 인메모리 Map들을 Redis로 대체
+  // const connectedUsers = new Map(); -> SocketStateService.setConnectedUser/getConnectedUser
+  // const streamingSessions = new Map(); -> SocketStateService.setStreamingSession/getStreamingSession
+  // const userRooms = new Map(); -> SocketStateService.setUserRoom/getUserRoom
+  // const messageQueues = new Map(); -> SocketStateService.setMessageQueue/getMessageQueue
+  // const messageLoadRetries = new Map(); -> SocketStateService.setMessageRetry/getMessageRetry
+  
   const BATCH_SIZE = 30;  // 한 번에 로드할 메시지 수
   const LOAD_DELAY = 300; // 메시지 로드 딜레이 (ms)
   const MAX_RETRIES = 3;  // 최대 재시도 횟수
@@ -116,19 +119,20 @@ module.exports = function(io) {
     const retryKey = `${roomId}:${socket.user.id}`;
     
     try {
-      if (messageLoadRetries.get(retryKey) >= MAX_RETRIES) {
+      const currentRetries = await SocketStateService.getMessageRetry(retryKey);
+      if (currentRetries >= MAX_RETRIES) {
         throw new Error('최대 재시도 횟수를 초과했습니다.');
       }
 
       const result = await loadMessages(socket, roomId, before);
-      messageLoadRetries.delete(retryKey);
+      await SocketStateService.removeMessageRetry(retryKey);
       return result;
 
     } catch (error) {
-      const currentRetries = messageLoadRetries.get(retryKey) || 0;
+      const currentRetries = await SocketStateService.getMessageRetry(retryKey);
       
       if (currentRetries < MAX_RETRIES) {
-        messageLoadRetries.set(retryKey, currentRetries + 1);
+        await SocketStateService.setMessageRetry(retryKey, currentRetries + 1);
         const delay = Math.min(RETRY_DELAY * Math.pow(2, currentRetries), 10000);
         
         logDebug('retrying message load', {
@@ -141,7 +145,7 @@ module.exports = function(io) {
         return loadMessagesWithRetry(socket, roomId, before, currentRetries + 1);
       }
 
-      messageLoadRetries.delete(retryKey);
+      await SocketStateService.removeMessageRetry(retryKey);
       throw error;
     }
   };
@@ -198,7 +202,7 @@ module.exports = function(io) {
       }
 
       // 이미 연결된 사용자인지 확인
-      const existingSocketId = connectedUsers.get(decoded.user.id);
+      const existingSocketId = await SocketStateService.getConnectedUser(decoded.user.id);
       if (existingSocketId) {
         const existingSocket = io.sockets.sockets.get(existingSocketId);
         if (existingSocket) {
@@ -244,7 +248,7 @@ module.exports = function(io) {
     }
   });
   
-  io.on('connection', (socket) => {
+  io.on('connection', async (socket) => {
     logDebug('socket connected', {
       socketId: socket.id,
       userId: socket.user?.id,
@@ -253,7 +257,7 @@ module.exports = function(io) {
 
     if (socket.user) {
       // 이전 연결이 있는지 확인
-      const previousSocketId = connectedUsers.get(socket.user.id);
+      const previousSocketId = await SocketStateService.getConnectedUser(socket.user.id);
       if (previousSocketId && previousSocketId !== socket.id) {
         const previousSocket = io.sockets.sockets.get(previousSocketId);
         if (previousSocket) {
@@ -277,7 +281,7 @@ module.exports = function(io) {
       }
       
       // 새로운 연결 정보 저장
-      connectedUsers.set(socket.user.id, socket.id);
+      await SocketStateService.setConnectedUser(socket.user.id, socket.id);
     }
 
     // 이전 메시지 로딩 처리 개선
@@ -299,7 +303,8 @@ module.exports = function(io) {
           throw new Error('채팅방 접근 권한이 없습니다.');
         }
 
-        if (messageQueues.get(queueKey)) {
+        const isLoading = await SocketStateService.getMessageQueue(queueKey);
+        if (isLoading) {
           logDebug('message load skipped - already loading', {
             roomId,
             userId: socket.user.id
@@ -307,7 +312,7 @@ module.exports = function(io) {
           return;
         }
 
-        messageQueues.set(queueKey, true);
+        await SocketStateService.setMessageQueue(queueKey, true);
         socket.emit('messageLoadStart');
 
         const result = await loadMessagesWithRetry(socket, roomId, before);
@@ -328,8 +333,8 @@ module.exports = function(io) {
           message: error.message || '이전 메시지를 불러오는 중 오류가 발생했습니다.'
         });
       } finally {
-        setTimeout(() => {
-          messageQueues.delete(queueKey);
+        setTimeout(async () => {
+          await SocketStateService.removeMessageQueue(queueKey);
         }, LOAD_DELAY);
       }
     });
@@ -342,7 +347,7 @@ module.exports = function(io) {
         }
 
         // 이미 해당 방에 참여 중인지 확인
-        const currentRoom = userRooms.get(socket.user.id);
+        const currentRoom = await SocketStateService.getUserRoom(socket.user.id);
         if (currentRoom === roomId) {
           logDebug('already in room', {
             userId: socket.user.id,
@@ -359,7 +364,8 @@ module.exports = function(io) {
             roomId: currentRoom 
           });
           socket.leave(currentRoom);
-          userRooms.delete(socket.user.id);
+          await SocketStateService.removeUserRoom(socket.user.id);
+          await SocketStateService.removeUserFromRoom(currentRoom, socket.user.id);
           
           socket.to(currentRoom).emit('userLeft', {
             userId: socket.user.id,
@@ -382,7 +388,8 @@ module.exports = function(io) {
         }
 
         socket.join(roomId);
-        userRooms.set(socket.user.id, roomId);
+        await SocketStateService.setUserRoom(socket.user.id, roomId);
+        await SocketStateService.addUserToRoom(roomId, socket.user.id);
 
         // 입장 메시지 생성
         const joinMessage = new Message({
@@ -399,16 +406,15 @@ module.exports = function(io) {
         const { messages, hasMore, oldestTimestamp } = messageLoadResult;
 
         // 활성 스트리밍 메시지 조회
-        const activeStreams = Array.from(streamingSessions.values())
-          .filter(session => session.room === roomId)
-          .map(session => ({
-            _id: session.messageId,
-            type: 'ai',
-            aiType: session.aiType,
-            content: session.content,
-            timestamp: session.timestamp,
-            isStreaming: true
-          }));
+        const activeStreamingSessions = await SocketStateService.getStreamingSessionsByRoom(roomId);
+        const activeStreams = activeStreamingSessions.map(session => ({
+          _id: session.messageId,
+          type: 'ai',
+          aiType: session.aiType,
+          content: session.content,
+          timestamp: session.timestamp,
+          isStreaming: true
+        }));
 
         // 이벤트 발송
         socket.emit('joinRoomSuccess', {
@@ -551,7 +557,7 @@ module.exports = function(io) {
         if (aiMentions.length > 0) {
           for (const ai of aiMentions) {
             const query = content.replace(new RegExp(`@${ai}\\b`, 'g'), '').trim();
-            await handleAIResponse(io, room, ai, query);
+            await handleAIResponse(socket, io, room, ai, query);
           }
         }
 
@@ -580,7 +586,7 @@ module.exports = function(io) {
         }
 
         // 실제로 해당 방에 참여 중인지 먼저 확인
-        const currentRoom = userRooms?.get(socket.user.id);
+        const currentRoom = await SocketStateService.getUserRoom(socket.user.id);
         if (!currentRoom || currentRoom !== roomId) {
           console.log(`User ${socket.user.id} is not in room ${roomId}`);
           return;
@@ -598,7 +604,8 @@ module.exports = function(io) {
         }
 
         socket.leave(roomId);
-        userRooms.delete(socket.user.id);
+        await SocketStateService.removeUserRoom(socket.user.id);
+        await SocketStateService.removeUserFromRoom(roomId, socket.user.id);
 
         // 퇴장 메시지 생성 및 저장
         const leaveMessage = await Message.create({
@@ -624,15 +631,11 @@ module.exports = function(io) {
         }
 
         // 스트리밍 세션 정리
-        for (const [messageId, session] of streamingSessions.entries()) {
-          if (session.room === roomId && session.userId === socket.user.id) {
-            streamingSessions.delete(messageId);
-          }
-        }
+        await SocketStateService.removeStreamingSessionsByRoomAndUser(roomId, socket.user.id);
 
         // 메시지 큐 정리
         const queueKey = `${roomId}:${socket.user.id}`;
-        messageQueues.delete(queueKey);
+        await SocketStateService.removeMessageQueue(queueKey);
         messageLoadRetries.delete(queueKey);
 
         // 이벤트 발송
@@ -655,30 +658,25 @@ module.exports = function(io) {
 
       try {
         // 해당 사용자의 현재 활성 연결인 경우에만 정리
-        if (connectedUsers.get(socket.user.id) === socket.id) {
-          connectedUsers.delete(socket.user.id);
+        const currentSocketId = await SocketStateService.getConnectedUser(socket.user.id);
+        if (currentSocketId === socket.id) {
+          await SocketStateService.removeConnectedUser(socket.user.id);
         }
 
-        const roomId = userRooms.get(socket.user.id);
-        userRooms.delete(socket.user.id);
+        const roomId = await SocketStateService.getUserRoom(socket.user.id);
+        await SocketStateService.removeUserRoom(socket.user.id);
 
-        // 메시지 큐 정리
-        const userQueues = Array.from(messageQueues.keys())
-          .filter(key => key.endsWith(`:${socket.user.id}`));
-        userQueues.forEach(key => {
-          messageQueues.delete(key);
-          messageLoadRetries.delete(key);
-        });
+        // 메시지 큐 및 재시도 정리
+        await SocketStateService.removeMessageQueuesByUser(socket.user.id);
+        await SocketStateService.removeMessageRetriesByUser(socket.user.id);
         
         // 스트리밍 세션 정리
-        for (const [messageId, session] of streamingSessions.entries()) {
-          if (session.userId === socket.user.id) {
-            streamingSessions.delete(messageId);
-          }
-        }
+        await SocketStateService.removeStreamingSessionsByUser(socket.user.id);
 
         // 현재 방에서 자동 퇴장 처리
         if (roomId) {
+          await SocketStateService.removeUserFromRoom(roomId, socket.user.id);
+          
           // 다른 디바이스로 인한 연결 종료가 아닌 경우에만 처리
           if (reason !== 'client namespace disconnect' && reason !== 'duplicate_login') {
             const leaveMessage = await Message.create({
@@ -838,20 +836,21 @@ module.exports = function(io) {
   }
 
   // AI 응답 처리 함수 개선
-  async function handleAIResponse(io, room, aiName, query) {
+  async function handleAIResponse(socket, io, room, aiName, query) {
     const messageId = `${aiName}-${Date.now()}`;
     let accumulatedContent = '';
     const timestamp = new Date();
 
     // 스트리밍 세션 초기화
-    streamingSessions.set(messageId, {
+    await SocketStateService.setStreamingSession(messageId, {
       room,
       aiType: aiName,
       content: '',
       messageId,
       timestamp,
       lastUpdate: Date.now(),
-      reactions: {}
+      reactions: {},
+      userId: socket.user.id
     });
     
     logDebug('AI response started', {
@@ -880,11 +879,10 @@ module.exports = function(io) {
         onChunk: async (chunk) => {
           accumulatedContent += chunk.currentChunk || '';
           
-          const session = streamingSessions.get(messageId);
-          if (session) {
-            session.content = accumulatedContent;
-            session.lastUpdate = Date.now();
-          }
+          await SocketStateService.updateStreamingSession(messageId, {
+            content: accumulatedContent,
+            lastUpdate: Date.now()
+          });
 
           io.to(room).emit('aiMessageChunk', {
             messageId,
@@ -898,7 +896,7 @@ module.exports = function(io) {
         },
         onComplete: async (finalContent) => {
           // 스트리밍 세션 정리
-          streamingSessions.delete(messageId);
+          await SocketStateService.removeStreamingSession(messageId);
 
           // AI 메시지 저장
           const aiMessage = await Message.create({
@@ -935,8 +933,8 @@ module.exports = function(io) {
             generationTime: Date.now() - timestamp
           });
         },
-        onError: (error) => {
-          streamingSessions.delete(messageId);
+        onError: async (error) => {
+          await SocketStateService.removeStreamingSession(messageId);
           console.error('AI response error:', error);
           
           io.to(room).emit('aiMessageError', {
@@ -953,7 +951,7 @@ module.exports = function(io) {
         }
       });
     } catch (error) {
-      streamingSessions.delete(messageId);
+      await SocketStateService.removeStreamingSession(messageId);
       console.error('AI service error:', error);
       
       io.to(room).emit('aiMessageError', {

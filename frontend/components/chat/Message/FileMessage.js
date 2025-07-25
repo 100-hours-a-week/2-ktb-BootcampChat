@@ -3,10 +3,8 @@ import {
   PdfIcon as FileText,
   ImageIcon as Image,
   MovieIcon as Film,
-  CorrectOutlineIcon as CheckCheck,
-  CorrectOutlineIcon as Check,
-  MusicIcon as Music,
-  ExternalLinkIcon as ExternalLink,
+  SoundOnIcon as Music,
+  OpenFileIcon as ExternalLink,
   DownloadIcon as Download,
   ErrorCircleIcon as AlertCircle,
 } from "@vapor-ui/icons";
@@ -105,115 +103,78 @@ const FileMessage = ({
 
   const handleFileDownload = async (e) => {
     e.preventDefault();
-    e.stopPropagation();
     setError(null);
 
     try {
-      if (!msg.file?.filename) {
-        throw new Error("파일 정보가 없습니다.");
-      }
-
-      const user = authService.getCurrentUser();
-      if (!user?.token || !user?.sessionId) {
-        throw new Error("인증 정보가 없습니다.");
-      }
-
-      const baseUrl = fileService.getFileUrl(msg.file.filename, false);
-      const authenticatedUrl = `${baseUrl}?token=${encodeURIComponent(
-        user.token
-      )}&sessionId=${encodeURIComponent(user.sessionId)}&download=true`;
+      const url = await fileService.getResolvedFileUrl(
+        msg.file.filename,
+        false
+      );
 
       const link = document.createElement("a");
-      link.href = authenticatedUrl;
+      link.href = url;
       link.download = getDecodedFilename(msg.file.originalname);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    } catch (error) {
-      console.error("File download error:", error);
-      setError(error.message || "파일 다운로드 중 오류가 발생했습니다.");
+    } catch (err) {
+      setError("파일 다운로드에 실패했습니다.");
     }
   };
 
-  const handleViewInNewTab = (e) => {
+  const handleViewInNewTab = async (e) => {
     e.preventDefault();
-    e.stopPropagation();
     setError(null);
 
     try {
-      if (!msg.file?.filename) {
-        throw new Error("파일 정보가 없습니다.");
-      }
-
-      const user = authService.getCurrentUser();
-      if (!user?.token || !user?.sessionId) {
-        throw new Error("인증 정보가 없습니다.");
-      }
-
-      const baseUrl = fileService.getFileUrl(msg.file.filename, true);
-      const authenticatedUrl = `${baseUrl}?token=${encodeURIComponent(
-        user.token
-      )}&sessionId=${encodeURIComponent(user.sessionId)}`;
-
-      const newWindow = window.open(authenticatedUrl, "_blank");
-      if (!newWindow) {
-        throw new Error("팝업이 차단되었습니다. 팝업 차단을 해제해주세요.");
-      }
-      newWindow.opener = null;
-    } catch (error) {
-      console.error("File view error:", error);
-      setError(error.message || "파일 보기 중 오류가 발생했습니다.");
+      const url = await fileService.getResolvedFileUrl(msg.file.filename, true);
+      const newWindow = window.open(url, "_blank");
+      if (!newWindow) throw new Error("팝업 차단됨");
+    } catch (err) {
+      setError("파일 미리보기에 실패했습니다.");
     }
   };
 
   const renderImagePreview = (originalname) => {
-    try {
-      if (!msg?.file?.filename) {
-        return (
-          <div className="flex items-center justify-center h-full bg-gray-100">
-            <Image className="w-8 h-8 text-gray-400" />
-          </div>
-        );
-      }
+    const [resolvedUrl, setResolvedUrl] = useState("");
 
-      const user = authService.getCurrentUser();
-      if (!user?.token || !user?.sessionId) {
-        throw new Error("인증 정보가 없습니다.");
-      }
+    useEffect(() => {
+      const fetchPreviewUrl = async () => {
+        try {
+          const url = await fileService.getResolvedFileUrl(
+            msg.file.filename,
+            true
+          );
+          setResolvedUrl(url);
+        } catch (err) {
+          setError("미리보기 이미지를 불러올 수 없습니다.");
+        }
+      };
+      fetchPreviewUrl();
+    }, [msg.file?.filename]);
 
-      const previewUrl = fileService.getPreviewUrl(msg.file, true);
-
-      return (
-        <div className="bg-transparent-pattern">
-          <img
-            src={previewUrl}
-            alt={originalname}
-            className="object-cover rounded-sm"
-            onLoad={() => {
-              console.debug("Image loaded successfully:", originalname);
-            }}
-            onError={(e) => {
-              console.error("Image load error:", {
-                error: e.error,
-                originalname,
-              });
-              e.target.onerror = null;
-              e.target.src = "/images/placeholder-image.png";
-              setError("이미지를 불러올 수 없습니다.");
-            }}
-            loading="lazy"
-          />
-        </div>
-      );
-    } catch (error) {
-      console.error("Image preview error:", error);
-      setError(error.message || "이미지 미리보기를 불러올 수 없습니다.");
+    if (!resolvedUrl) {
       return (
         <div className="flex items-center justify-center h-full bg-gray-100">
           <Image className="w-8 h-8 text-gray-400" />
         </div>
       );
     }
+
+    return (
+      <div className="bg-transparent-pattern">
+        <img
+          src={resolvedUrl}
+          alt={originalname}
+          className="object-cover rounded-sm"
+          onError={(e) => {
+            console.error("Image load error", e);
+            setError("이미지를 불러올 수 없습니다.");
+          }}
+          loading="lazy"
+        />
+      </div>
+    );
   };
 
   const renderFilePreview = () => {

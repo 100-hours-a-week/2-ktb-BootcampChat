@@ -1,41 +1,43 @@
-import React, { useEffect, useRef, useCallback, memo } from 'react';
-import { 
-  CloseOutlineIcon as X, 
-  ErrorCircleIcon as AlertCircle, 
-  ImageIcon, 
-  PdfIcon as FileText, 
-  MovieIcon as Film, 
-  LoadingOutlineIcon as Loader,
-  MusicIcon as Music,
-  FileIcon as File
-} from '@vapor-ui/icons';
-import { Button, IconButton, Callout } from '@vapor-ui/core';
-import fileService from '../../services/fileService';
+import React, { useEffect, useRef, useCallback, memo } from "react";
+import {
+  CloseOutlineIcon as X,
+  ErrorCircleIcon as AlertCircle,
+  ImageIcon,
+  PdfIcon as FileText,
+  MovieIcon as Film,
+  HourglassIcon as Loader,
+  SoundOnIcon as Music,
+  FileIcon as File,
+} from "@vapor-ui/icons";
+import { Button, IconButton, Callout } from "@vapor-ui/core";
+import fileService from "../../services/fileService";
 
-const FilePreview = ({ 
+const FilePreview = ({
   files = [],
-  uploading = false, 
-  uploadProgress = 0, 
-  uploadError = null, 
+  uploading = false,
+  uploadProgress = 0,
+  uploadError = null,
   onRemove,
   onRetry,
   onDrop,
-  className = '',
+  className = "",
   showFileName = true,
   showFileSize = true,
-  variant = 'default',
-  previewSize = 'md',
+  variant = "default",
+  previewSize = "md",
   allowPaste = true,
-  maxFiles = 10
+  maxFiles = 10,
 }) => {
   const containerRef = useRef(null);
   const previewUrlsRef = useRef(new Map());
   const dragCounter = useRef(0);
 
+  console.log("✅", { Loader, Music, File }); // undefined가 뜨는 아이콘이 문제
+
   // 파일 객체 URL 정리를 위한 클린업
   useEffect(() => {
     return () => {
-      previewUrlsRef.current.forEach(url => {
+      previewUrlsRef.current.forEach((url) => {
         URL.revokeObjectURL(url);
       });
       previewUrlsRef.current.clear();
@@ -48,17 +50,17 @@ const FilePreview = ({
       await fileService.validateFile(file);
       const fileObject = {
         file,
-        name: file.name || `file-${Date.now()}.${file.type.split('/')[1]}`,
+        name: file.name || `file-${Date.now()}.${file.type.split("/")[1]}`,
         type: file.type,
-        size: file.size
+        size: file.size,
       };
 
       const previewUrl = URL.createObjectURL(file);
       previewUrlsRef.current.set(fileObject.name, previewUrl);
-      
+
       return fileObject;
     } catch (error) {
-      console.error('File processing error:', error);
+      console.error("File processing error:", error);
       throw error;
     }
   }, []);
@@ -75,11 +77,12 @@ const FilePreview = ({
       if (!items) return;
 
       const fileItems = Array.from(items).filter(
-        item => item.kind === 'file' && 
-        (item.type.startsWith('image/') || 
-         item.type.startsWith('video/') || 
-         item.type.startsWith('audio/') || 
-         item.type === 'application/pdf')
+        (item) =>
+          item.kind === "file" &&
+          (item.type.startsWith("image/") ||
+            item.type.startsWith("video/") ||
+            item.type.startsWith("audio/") ||
+            item.type === "application/pdf")
       );
 
       if (fileItems.length === 0) return;
@@ -97,13 +100,13 @@ const FilePreview = ({
           const processedFile = await processFile(file);
           onDrop?.(processedFile);
         } catch (error) {
-          console.error('Paste handling error:', error);
+          console.error("Paste handling error:", error);
         }
       }
     };
 
-    document.addEventListener('paste', handlePaste);
-    return () => document.removeEventListener('paste', handlePaste);
+    document.addEventListener("paste", handlePaste);
+    return () => document.removeEventListener("paste", handlePaste);
   }, [allowPaste, files.length, maxFiles, onDrop, processFile]);
 
   // 드래그 앤 드롭 이벤트 핸들러
@@ -115,17 +118,17 @@ const FilePreview = ({
       e.stopPropagation();
       dragCounter.current = 0;
 
-      containerRef.current.classList.remove('drag-over');
+      containerRef.current.classList.remove("drag-over");
 
       if (files.length >= maxFiles) return;
 
-      const droppedFiles = Array.from(e.dataTransfer.files)
-        .filter(file => 
-          file.type.startsWith('image/') || 
-          file.type.startsWith('video/') || 
-          file.type.startsWith('audio/') || 
-          file.type === 'application/pdf'
-        );
+      const droppedFiles = Array.from(e.dataTransfer.files).filter(
+        (file) =>
+          file.type.startsWith("image/") ||
+          file.type.startsWith("video/") ||
+          file.type.startsWith("audio/") ||
+          file.type === "application/pdf"
+      );
 
       if (droppedFiles.length === 0) return;
 
@@ -137,7 +140,7 @@ const FilePreview = ({
           const processedFile = await processFile(file);
           onDrop(processedFile);
         } catch (error) {
-          console.error('Drop handling error:', error);
+          console.error("Drop handling error:", error);
         }
       }
     };
@@ -146,7 +149,7 @@ const FilePreview = ({
       e.preventDefault();
       e.stopPropagation();
       if (files.length < maxFiles) {
-        containerRef.current.classList.add('drag-over');
+        containerRef.current.classList.add("drag-over");
       }
     };
 
@@ -155,7 +158,7 @@ const FilePreview = ({
       e.stopPropagation();
       dragCounter.current++;
       if (dragCounter.current === 1 && files.length < maxFiles) {
-        containerRef.current.classList.add('drag-over');
+        containerRef.current.classList.add("drag-over");
       }
     };
 
@@ -164,115 +167,123 @@ const FilePreview = ({
       e.stopPropagation();
       dragCounter.current--;
       if (dragCounter.current === 0) {
-        containerRef.current.classList.remove('drag-over');
+        containerRef.current.classList.remove("drag-over");
       }
     };
 
     const elem = containerRef.current;
-    elem.addEventListener('drop', handleDrop);
-    elem.addEventListener('dragover', handleDragOver);
-    elem.addEventListener('dragenter', handleDragEnter);
-    elem.addEventListener('dragleave', handleDragLeave);
+    elem.addEventListener("drop", handleDrop);
+    elem.addEventListener("dragover", handleDragOver);
+    elem.addEventListener("dragenter", handleDragEnter);
+    elem.addEventListener("dragleave", handleDragLeave);
 
     return () => {
-      elem.removeEventListener('drop', handleDrop);
-      elem.removeEventListener('dragover', handleDragOver);
-      elem.removeEventListener('dragenter', handleDragEnter);
-      elem.removeEventListener('dragleave', handleDragLeave);
+      elem.removeEventListener("drop", handleDrop);
+      elem.removeEventListener("dragover", handleDragOver);
+      elem.removeEventListener("dragenter", handleDragEnter);
+      elem.removeEventListener("dragleave", handleDragLeave);
     };
   }, [files.length, maxFiles, onDrop, processFile]);
 
-  const getFileIcon = useCallback((file) => {
-    const iconProps = {
-      size: variant === 'compact' ? 20 : 24,
-      className: 'file-icon',
-      'aria-hidden': true
-    };
+  const getFileIcon = useCallback(
+    (file) => {
+      const iconProps = {
+        size: variant === "compact" ? 20 : 24,
+        className: "file-icon",
+        "aria-hidden": true,
+      };
 
-    if (file.type.startsWith('image/')) {
-      return <ImageIcon {...iconProps} color="#00C853" />;
-    } else if (file.type.startsWith('video/')) {
-      return <Film {...iconProps} color="#2196F3" />;
-    } else if (file.type.startsWith('audio/')) {
-      return <Music {...iconProps} color="#9C27B0" />;
-    } else if (file.type === 'application/pdf') {
-      return <FileText {...iconProps} color="#F44336" />;
-    } else {
-      return <File {...iconProps} color="#757575" />;
-    }
-  }, [variant]);
+      if (file.type.startsWith("image/")) {
+        return <ImageIcon {...iconProps} color="#00C853" />;
+      } else if (file.type.startsWith("video/")) {
+        return <Film {...iconProps} color="#2196F3" />;
+      } else if (file.type.startsWith("audio/")) {
+        return <Music {...iconProps} color="#9C27B0" />;
+      } else if (file.type === "application/pdf") {
+        return <FileText {...iconProps} color="#F44336" />;
+      } else {
+        return <File {...iconProps} color="#757575" />;
+      }
+    },
+    [variant]
+  );
 
-  const renderFilePreview = useCallback((file) => {
-    const previewUrl = previewUrlsRef.current.get(file.name);
-    const previewContainer = "rounded-lg overflow-hidden relative";
-    const previewBackground = "bg-transparent-pattern";
+  const renderFilePreview = useCallback(
+    (file) => {
+      const previewUrl = previewUrlsRef.current.get(file.name);
+      const previewContainer = "rounded-lg overflow-hidden relative";
+      const previewBackground = "bg-transparent-pattern";
 
-    if (file.type.startsWith('image/')) {
-      return (
-        <div className={`${previewContainer} ${previewBackground}`}>
-          <img
-            src={previewUrl || file.url}
-            alt={`${file.name} 미리보기`}
-            className="w-full h-full object-cover"
-            onError={(e) => {
-              e.target.onerror = null;
-              e.target.src = '/placeholder-image.png';
-              e.target.alt = '이미지 로드 실패';
-            }}
-            loading="lazy"
-          />
-        </div>
-      );
-    }
-
-    if (file.type.startsWith('video/')) {
-      return (
-        <div className={`${previewContainer}`}>
-          <video
-            src={previewUrl || file.url}
-            className="w-full h-full object-cover"
-            controls={variant !== 'compact'}
-            controlsList="nodownload"
-            preload="metadata"
-            aria-label={`${file.name} 비디오 미리보기`}
-          >
-            <source src={previewUrl || file.url} type={file.type} />
-            <track kind="captions" />
-            비디오 미리보기를 지원하지 않는 브라우저입니다.
-          </video>
-          <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-30">
-            {getFileIcon(file)}
+      if (file.type.startsWith("image/")) {
+        return (
+          <div className={`${previewContainer} ${previewBackground}`}>
+            <img
+              src={previewUrl || file.url}
+              alt={`${file.name} 미리보기`}
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                e.target.onerror = null;
+                e.target.src = "/placeholder-image.png";
+                e.target.alt = "이미지 로드 실패";
+              }}
+              loading="lazy"
+            />
           </div>
+        );
+      }
+
+      if (file.type.startsWith("video/")) {
+        return (
+          <div className={`${previewContainer}`}>
+            <video
+              src={previewUrl || file.url}
+              className="w-full h-full object-cover"
+              controls={variant !== "compact"}
+              controlsList="nodownload"
+              preload="metadata"
+              aria-label={`${file.name} 비디오 미리보기`}
+            >
+              <source src={previewUrl || file.url} type={file.type} />
+              <track kind="captions" />
+              비디오 미리보기를 지원하지 않는 브라우저입니다.
+            </video>
+            <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-30">
+              {getFileIcon(file)}
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div
+          className={`${previewContainer} flex flex-col items-center justify-center`}
+          role="img"
+          aria-label={`${file.name} 파일 아이콘`}
+        >
+          {getFileIcon(file)}
+          {showFileName && (
+            <span className="mt-2 text-xs text-gray-600 truncate max-w-[80px]">
+              {file.type.split("/")[1].toUpperCase()}
+            </span>
+          )}
         </div>
       );
-    }
-
-    return (
-      <div className={`${previewContainer} flex flex-col items-center justify-center`}
-           role="img"
-           aria-label={`${file.name} 파일 아이콘`}>
-        {getFileIcon(file)}
-        {showFileName && (
-          <span className="mt-2 text-xs text-gray-600 truncate max-w-[80px]">
-            {file.type.split('/')[1].toUpperCase()}
-          </span>
-        )}
-      </div>
-    );
-  }, [variant, showFileName, getFileIcon]);
+    },
+    [variant, showFileName, getFileIcon]
+  );
 
   const renderProgressBar = () => {
     if (!uploading) return null;
 
     return (
-      <div 
+      <div
         className="mt-4 h-1 w-full bg-gray-200 rounded-full overflow-hidden"
         role="progressbar"
         aria-valuenow={uploadProgress}
         aria-valuemin="0"
         aria-valuemax="100"
       >
-        <div 
+        <div
           className="h-full bg-primary transition-all duration-300 ease-in-out"
           style={{ width: `${uploadProgress}%` }}
         />
@@ -287,11 +298,7 @@ const FilePreview = ({
           <AlertCircle className="w-4 h-4" aria-hidden="true" />
           <span className="flex-1">{uploadError}</span>
           {onRetry && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={onRetry}
-            >
+            <Button size="sm" variant="outline" onClick={onRetry}>
               다시 시도
             </Button>
           )}
@@ -314,25 +321,24 @@ const FilePreview = ({
   if (files.length === 0) return null;
 
   return (
-    <div 
+    <div
       ref={containerRef}
-      className={`file-preview-scroll-container ${className} ${onDrop ? 'cursor-pointer' : ''}`}
+      className={`file-preview-scroll-container ${className} ${
+        onDrop ? "cursor-pointer" : ""
+      }`}
       role="region"
       aria-label="파일 미리보기"
     >
       <div className="file-preview-list">
         {files.map((file, index) => (
-          <div 
-            key={`${file.name}-${index}`}
-            className="file-preview-item"
-          >
+          <div key={`${file.name}-${index}`} className="file-preview-item">
             <div className="file-preview-content">
               {renderFilePreview(file)}
-              
+
               <div className="flex-1 min-w-0">
                 {showFileName && (
-                  <div 
-                    className="text-sm font-medium truncate" 
+                  <div
+                    className="text-sm font-medium truncate"
                     title={file.name}
                   >
                     {file.name}
@@ -345,7 +351,7 @@ const FilePreview = ({
                 )}
               </div>
 
-              {variant !== 'readonly' && (
+              {variant !== "readonly" && (
                 <div className="flex-shrink-0">
                   {!uploading && onRemove && (
                     <IconButton
@@ -383,7 +389,7 @@ const FilePreview = ({
       )}
 
       {onDrop && (
-        <div 
+        <div
           className="absolute inset-0 bg-primary/10 border-2 border-primary border-dashed rounded-lg opacity-0 pointer-events-none transition-opacity drag-over:opacity-100"
           aria-hidden="true"
         >
@@ -396,19 +402,6 @@ const FilePreview = ({
       )}
     </div>
   );
-};
-
-FilePreview.defaultProps = {
-  files: [],
-  uploading: false,
-  uploadProgress: 0,
-  uploadError: null,
-  showFileName: true,
-  showFileSize: true,
-  previewSize: 'md',
-  variant: 'default',
-  allowPaste: true,
-  maxFiles: 10
 };
 
 export default memo(FilePreview);
