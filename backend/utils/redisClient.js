@@ -401,6 +401,31 @@ class RedisClusterClient {
       throw error;
     }
   }
+
+  async deleteByPattern(pattern) {
+    try {
+      await this.ensureConnection();
+      const nodes = this.client.nodes('master');
+      const promises = [];
+
+      for (const node of nodes) {
+        const stream = node.scanStream({ match: pattern, count: 100 });
+        const promise = new Promise((resolve, reject) => {
+          stream.on('data', (keys) => {
+            if (keys.length > 0) {
+              node.del(keys);
+            }
+          });
+          stream.on('end', resolve);
+          stream.on('error', reject);
+        });
+        promises.push(promise);
+      }
+      await Promise.all(promises);
+    } catch (error) {
+      console.error(`[Redis] Error deleting keys with pattern ${pattern}:`, error);
+    }
+  }
 }
 
 const redisClient = new RedisClusterClient();

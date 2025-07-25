@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../../middleware/auth');
 const Room = require('../../models/Room');
-const User = require('../../models/User');
+const roomRepository = require('../../repositories/roomRepository');
 const { rateLimit } = require('express-rate-limit');
 let io;
 
@@ -75,68 +75,15 @@ router.get('/health', async (req, res) => {
 // 채팅방 목록 조회 (페이징 적용)
 router.get('/', [limiter, auth], async (req, res) => {
   try {
-    // 쿼리 파라미터 검증 (페이지네이션)
-    const page = Math.max(0, parseInt(req.query.page) || 0);
-    const pageSize = Math.min(Math.max(1, parseInt(req.query.pageSize) || 10), 50);
-    const skip = page * pageSize;
+    const { page, pageSize, search, sortField, sortOrder } = req.query;
 
-    // 정렬 설정
-    const allowedSortFields = ['createdAt', 'name', 'participantsCount'];
-    const sortField = allowedSortFields.includes(req.query.sortField) 
-      ? req.query.sortField 
-      : 'createdAt';
-    const sortOrder = ['asc', 'desc'].includes(req.query.sortOrder)
-      ? req.query.sortOrder
-      : 'desc';
-
-    // 검색 필터 구성
-    const filter = {};
-    if (req.query.search) {
-      filter.name = { $regex: req.query.search, $options: 'i' };
-    }
-
-    // 총 문서 수 조회
-    const totalCount = await Room.countDocuments(filter);
-
-    // 채팅방 목록 조회 with 페이지네이션
-    const rooms = await Room.find(filter)
-      .populate('creator', 'name email')
-      .populate('participants', 'name email')
-      .sort({ [sortField]: sortOrder === 'desc' ? -1 : 1 })
-      .skip(skip)
-      .limit(pageSize)
-      .lean();
-
-    // 안전한 응답 데이터 구성 
-    const safeRooms = rooms.map(room => {
-      if (!room) return null;
-
-      const creator = room.creator || { _id: 'unknown', name: '알 수 없음', email: '' };
-      const participants = Array.isArray(room.participants) ? room.participants : [];
-
-      return {
-        _id: room._id?.toString() || 'unknown',
-        name: room.name || '제목 없음',
-        hasPassword: !!room.hasPassword,
-        creator: {
-          _id: creator._id?.toString() || 'unknown',
-          name: creator.name || '알 수 없음',
-          email: creator.email || ''
-        },
-        participants: participants.filter(p => p && p._id).map(p => ({
-          _id: p._id.toString(),
-          name: p.name || '알 수 없음',
-          email: p.email || ''
-        })),
-        participantsCount: participants.length,
-        createdAt: room.createdAt || new Date(),
-        isCreator: creator._id?.toString() === req.user.id,
-      };
-    }).filter(room => room !== null);
-
-    // 메타데이터 계산    
-    const totalPages = Math.ceil(totalCount / pageSize);
-    const hasMore = skip + rooms.length < totalCount;
+    const responseData = await roomRepository.getRooms({
+      page: parseInt(page) || 0,
+      pageSize: parseInt(pageSize) || 10,
+      search,
+      sortField,
+      sortOrder,
+    });
 
     // 캐시 설정
     res.set({
@@ -145,22 +92,7 @@ router.get('/', [limiter, auth], async (req, res) => {
     });
 
     // 응답 전송
-    res.json({
-      success: true,
-      data: safeRooms,
-      metadata: {
-        total: totalCount,
-        page,
-        pageSize,
-        totalPages,
-        hasMore,
-        currentCount: safeRooms.length,
-        sort: {
-          field: sortField,
-          order: sortOrder
-        }
-      }
-    });
+    res.json(responseData);
 
   } catch (error) {
     console.error('방 목록 조회 에러:', error);
@@ -193,22 +125,15 @@ router.post('/', auth, async (req, res) => {
       });
     }
 
-    const newRoom = new Room({
-      name: name.trim(),
-      creator: req.user.id,
-      participants: [req.user.id],
-      password: password
-    });
-
-    const savedRoom = await newRoom.save();
-    const populatedRoom = await Room.findById(savedRoom._id)
-      .populate('creator', 'name email')
-      .populate('participants', 'name email');
+    const populatedRoom = await roomRepository.createRoom(
+      { name: name.trim(), password },
+      req.user.id
+    );
     
     // Socket.IO를 통해 새 채팅방 생성 알림
     if (io) {
       io.to('room-list').emit('roomCreated', {
-        ...populatedRoom.toObject(),
+        ...populatedRoom,
         password: undefined
       });
     }
@@ -216,7 +141,7 @@ router.post('/', auth, async (req, res) => {
     res.status(201).json({
       success: true,
       data: {
-        ...populatedRoom.toObject(),
+        ...populatedRoom,
         password: undefined
       }
     });
@@ -288,6 +213,7 @@ router.post('/:roomId/join', auth, async (req, res) => {
     if (!room.participants.includes(req.user.id)) {
       room.participants.push(req.user.id);
       await room.save();
+      await roomRepository.invalidateFirstPageCache();
     }
 
     const populatedRoom = await room.populate('participants', 'name email');
